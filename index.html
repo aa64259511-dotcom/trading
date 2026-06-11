@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>股票策略分析</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace" aria-label="股票策略分析工作台">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Stock Strategy Desk</p>
+            <h1>股票策略分析</h1>
+          </div>
+          <div class="market-pulse" aria-label="市场状态">
+            <span class="pulse-dot"></span>
+            <span id="marketState">等待输入</span>
+          </div>
+        </header>
+
+        <div class="mode-tabs" role="tablist" aria-label="功能类型">
+          <button class="tab-button active" type="button" data-view="buy" role="tab" aria-selected="true">买入策略</button>
+          <button class="tab-button" type="button" data-view="sell" role="tab" aria-selected="false">卖出策略</button>
+          <button class="tab-button" type="button" data-view="training" role="tab" aria-selected="false">支撑压力训练</button>
+        </div>
+
+        <section class="content-grid strategy-view" id="strategyView">
+          <form class="analysis-form" id="analysisForm">
+            <div class="form-header">
+              <div>
+                <h2>行情输入</h2>
+                <p>填写关键指标后自动生成策略结论</p>
+              </div>
+              <button class="ghost-button" id="loadSample" type="button">示例</button>
+            </div>
+
+            <div class="field-grid">
+              <label>股票名称 <input id="stockName" type="text" value="示例科技" autocomplete="off" /></label>
+              <label>当前价格 <input id="price" type="number" min="0" step="0.01" value="28.60" /></label>
+              <label>5日均线 <input id="ma5" type="number" min="0" step="0.01" value="28.10" /></label>
+              <label>20日均线 <input id="ma20" type="number" min="0" step="0.01" value="27.45" /></label>
+              <label>60日均线 <input id="ma60" type="number" min="0" step="0.01" value="25.80" /></label>
+              <label>RSI <input id="rsi" type="number" min="0" max="100" step="0.1" value="58" /></label>
+              <label>MACD DIF <input id="macdDif" type="number" step="0.001" value="0.32" /></label>
+              <label>MACD DEA <input id="macdDea" type="number" step="0.001" value="0.18" /></label>
+              <label>成交量倍率 <input id="volumeRatio" type="number" min="0" step="0.1" value="1.4" /></label>
+              <label>ATR波动率 % <input id="atr" type="number" min="0" step="0.1" value="3.2" /></label>
+              <label>近20日支撑 <input id="support" type="number" min="0" step="0.01" value="26.70" /></label>
+              <label>近20日压力 <input id="resistance" type="number" min="0" step="0.01" value="30.20" /></label>
+              <label>当前仓位 % <input id="position" type="number" min="0" max="100" step="1" value="30" /></label>
+              <label>持仓盈亏 % <input id="profit" type="number" step="0.1" value="8.5" /></label>
+            </div>
+
+            <div class="risk-row">
+              <label class="risk-choice"><input type="radio" name="risk" value="conservative" /><span>稳健</span></label>
+              <label class="risk-choice"><input type="radio" name="risk" value="balanced" checked /><span>均衡</span></label>
+              <label class="risk-choice"><input type="radio" name="risk" value="aggressive" /><span>进取</span></label>
+            </div>
+          </form>
+
+          <section class="result-panel" aria-live="polite">
+            <div class="score-band">
+              <div>
+                <p class="eyebrow" id="strategyLabel">买入策略</p>
+                <h2 id="stockTitle">示例科技</h2>
+              </div>
+              <div class="score-ring" id="scoreRing">
+                <span id="scoreValue">0</span>
+                <small>分</small>
+              </div>
+            </div>
+
+            <div class="decision" id="decisionBox">
+              <span class="decision-level" id="decisionLevel">等待分析</span>
+              <p id="decisionText">输入指标后查看策略建议。</p>
+            </div>
+
+            <div class="metrics-strip">
+              <div><span>入场区间</span><strong id="entryRange">--</strong></div>
+              <div><span>止损位</span><strong id="stopLoss">--</strong></div>
+              <div><span>目标位</span><strong id="targetPrice">--</strong></div>
+            </div>
+
+            <div class="chart-card">
+              <div class="chart-header">
+                <h3>价格结构</h3>
+                <span id="trendLabel">--</span>
+              </div>
+              <canvas id="signalChart" width="720" height="260"></canvas>
+            </div>
+
+            <div class="signal-list" id="signalList"></div>
+          </section>
+        </section>
+
+        <section class="training-view hidden" id="trainingView">
+          <div class="training-grid">
+            <form class="analysis-form training-form" id="trainingForm">
+              <div class="form-header">
+                <div>
+                  <h2>支撑压力训练</h2>
+                  <p>输入股票代码和分析日期，使用该日期之前3年周线拟合价格区间</p>
+                </div>
+                <button class="ghost-button" id="trainingSample" type="button">示例</button>
+              </div>
+
+              <div class="field-grid">
+                <label>股票代码 <input id="trainSymbol" type="text" value="000001" /></label>
+                <label>分析日期 <input id="trainDate" type="date" value="2025-06-11" /></label>
+                <label>聚类容差 % <input id="clusterPct" type="number" min="0.3" step="0.1" value="1.5" /></label>
+                <label>实体分桶 % <input id="bodyBinPct" type="number" min="0.3" step="0.1" value="1.0" /></label>
+                <label>波段窗口 <input id="swingWindow" type="number" min="2" max="8" step="1" value="3" /></label>
+                <label>验证反应 % <input id="reactionPct" type="number" min="1" step="0.5" value="3" /></label>
+              </div>
+
+              <label class="wide-label">
+                人工纠正价格
+                <textarea id="correctionsInput" rows="5">support: 29.6
+resistance: 31.8</textarea>
+              </label>
+
+              <label class="wide-label">
+                周线CSV数据
+                <textarea id="weeklyCsvInput" rows="10"></textarea>
+              </label>
+
+              <button class="primary-button" id="runTraining" type="button">开始拟合</button>
+            </form>
+
+            <section class="result-panel training-result" aria-live="polite">
+              <div class="score-band">
+                <div>
+                  <p class="eyebrow">Support Resistance Trainer</p>
+                  <h2 id="trainingTitle">等待训练</h2>
+                </div>
+              </div>
+
+              <div class="metrics-strip">
+                <div><span>当前价</span><strong id="trainCurrentPrice">--</strong></div>
+                <div><span>最近支撑</span><strong id="trainSupport">--</strong></div>
+                <div><span>最近压力</span><strong id="trainResistance">--</strong></div>
+              </div>
+
+              <div class="chart-card">
+                <div class="chart-header">
+                  <h3>拟合权重</h3>
+                  <span id="fitError">--</span>
+                </div>
+                <div class="weight-grid" id="weightGrid"></div>
+              </div>
+
+              <div class="level-table" id="levelTable"></div>
+            </section>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
