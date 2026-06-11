@@ -35,6 +35,7 @@ const canvas = document.querySelector("#signalChart");
 const ctx = canvas.getContext("2d");
 let activeStrategy = "buy";
 let activeView = "buy";
+let lastTrainingResult = null;
 
 const samples = {
   buy: {
@@ -521,6 +522,15 @@ function parseCorrections(text) {
   }).filter((item) => Number.isFinite(item.price));
 }
 
+function buildCorrectionsFromInputs() {
+  const support = Number(document.querySelector("#manualSupport").value);
+  const resistance = Number(document.querySelector("#manualResistance").value);
+  return [
+    Number.isFinite(support) && support > 0 ? { type: "support", price: support } : null,
+    Number.isFinite(resistance) && resistance > 0 ? { type: "resistance", price: resistance } : null,
+  ].filter(Boolean);
+}
+
 function getTrainingOptions() {
   return {
     symbol: document.querySelector("#trainSymbol").value.trim(),
@@ -530,7 +540,7 @@ function getTrainingOptions() {
     bodyBinPct: Number(document.querySelector("#bodyBinPct").value) / 100,
     swingWindow: Number(document.querySelector("#swingWindow").value),
     reactionPct: Number(document.querySelector("#reactionPct").value) / 100,
-    corrections: parseCorrections(document.querySelector("#correctionsInput").value),
+    corrections: buildCorrectionsFromInputs(),
   };
 }
 
@@ -722,15 +732,18 @@ function runTraining() {
 
 async function fetchRealTraining() {
   const button = document.querySelector("#fetchRealTraining");
+  await requestTraining(getTrainingOptions(), button, "正在拉取真实数据...");
+}
+
+async function requestTraining(options, button, loadingText) {
   const previousText = button.textContent;
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 60000);
   try {
-    const options = getTrainingOptions();
     if (!options.symbol || !options.date) throw new Error("请填写股票代码和分析日期。");
     button.disabled = true;
-    button.textContent = "正在拉取真实数据...";
-    document.querySelector("#trainingTitle").textContent = "正在拉取 AKShare 周线数据";
+    button.textContent = loadingText;
+    document.querySelector("#trainingTitle").textContent = "正在拉取 AKShare 周线和日线数据";
     const response = await fetch("/api/train-support-resistance", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -739,6 +752,7 @@ async function fetchRealTraining() {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "真实数据训练失败。");
+    lastTrainingResult = data;
     renderServerTrainingResult(data);
   } catch (error) {
     const message = error.name === "AbortError" ? "真实数据请求超过60秒，请稍后重试，或先用CSV拟合。" : error.message;
@@ -749,6 +763,34 @@ async function fetchRealTraining() {
     button.disabled = false;
     button.textContent = previousText;
   }
+}
+
+async function randomTraining() {
+  const button = document.querySelector("#randomTraining");
+  const previousText = button.textContent;
+  try {
+    button.disabled = true;
+    button.textContent = "正在抽取样本...";
+    const response = await fetch("/api/random-training-sample");
+    const sample = await response.json();
+    if (!response.ok) throw new Error(sample.error || "随机样本获取失败。");
+    document.querySelector("#trainSymbol").value = sample.symbol;
+    document.querySelector("#trainDate").value = sample.date;
+    document.querySelector("#manualSupport").value = "";
+    document.querySelector("#manualResistance").value = "";
+    await requestTraining(getTrainingOptions(), button, "正在训练样本...");
+  } catch (error) {
+    document.querySelector("#trainingTitle").textContent = "训练失败";
+    document.querySelector("#levelTable").innerHTML = `<div class="decision negative"><span class="decision-level">随机训练有问题</span><p>${error.message}</p></div>`;
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
+async function refitTraining() {
+  const button = document.querySelector("#refitTraining");
+  await requestTraining(getTrainingOptions(), button, "正在按修正重新拟合...");
 }
 
 function renderTrainingResult(result) {
@@ -781,6 +823,13 @@ function renderServerTrainingResult(result) {
   document.querySelector("#trainCurrentPrice").textContent = formatPrice(result.currentPrice);
   document.querySelector("#trainSupport").textContent = result.nearest?.support ? `${formatPrice(result.nearest.support.low)} - ${formatPrice(result.nearest.support.high)}` : "--";
   document.querySelector("#trainResistance").textContent = result.nearest?.resistance ? `${formatPrice(result.nearest.resistance.low)} - ${formatPrice(result.nearest.resistance.high)}` : "--";
+  document.querySelector("#correctionPanel").classList.remove("hidden");
+  if (!document.querySelector("#manualSupport").value && result.nearest?.support) {
+    document.querySelector("#manualSupport").value = formatPrice(result.nearest.support.mid);
+  }
+  if (!document.querySelector("#manualResistance").value && result.nearest?.resistance) {
+    document.querySelector("#manualResistance").value = formatPrice(result.nearest.resistance.mid);
+  }
   const precisionText = result.pricePrecision === "daily_refined" ? "日线精修" : "周线范围";
   const fitText = result.fitError === null ? "未输入纠正价格" : `拟合误差 ${(result.fitError * 100).toFixed(2)}%`;
   document.querySelector("#fitError").textContent = `${precisionText} · ${fitText}`;
@@ -805,16 +854,11 @@ document.querySelectorAll(".tab-button").forEach((button) => {
   button.addEventListener("click", () => setView(button.dataset.view));
 });
 
-document.querySelector("#loadSample").addEventListener("click", () => loadSample());
-document.querySelector("#trainingSample").addEventListener("click", () => {
-  document.querySelector("#trainSymbol").value = "000001";
-  document.querySelector("#trainDate").value = "2025-06-11";
-  document.querySelector("#weeklyCsvInput").value = sampleWeeklyCsv;
-  document.querySelector("#correctionsInput").value = "support: 29.6\nresistance: 31.8";
-  runTraining();
-});
-document.querySelector("#runTraining").addEventListener("click", runTraining);
-document.querySelector("#fetchRealTraining").addEventListener("click", fetchRealTraining);
+document.querySelector("#loadSample")?.addEventListener("click", () => loadSample());
+document.querySelector("#runTraining")?.addEventListener("click", runTraining);
+document.querySelector("#fetchRealTraining")?.addEventListener("click", fetchRealTraining);
+document.querySelector("#randomTraining")?.addEventListener("click", randomTraining);
+document.querySelector("#refitTraining")?.addEventListener("click", refitTraining);
 document.querySelector("#weeklyCsvInput").value = sampleWeeklyCsv;
 
 render();

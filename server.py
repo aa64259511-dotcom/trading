@@ -1,10 +1,65 @@
 import json
+import random
+import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import urlparse
 
 import pandas as pd
 
 from support_resistance_trainer import analyze, fetch_akshare_daily, fetch_akshare_weekly, parse_date
+
+
+RANDOM_SYMBOLS = [
+    "000001",
+    "000002",
+    "000333",
+    "000651",
+    "000858",
+    "002415",
+    "002594",
+    "300059",
+    "300750",
+    "600000",
+    "600036",
+    "600519",
+    "600887",
+    "601318",
+    "601398",
+]
+
+CACHE_DIR = Path("data_cache")
+
+
+def fetch_with_retry(fetcher, symbol, start_ts, analysis_ts, label, attempts=3):
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fetcher(symbol, start_ts, analysis_ts)
+        except Exception as exc:
+            last_error = exc
+            if attempt < attempts:
+                time.sleep(1.5 * attempt)
+    raise RuntimeError(f"{label}数据拉取失败，已重试{attempts}次：{last_error}")
+
+
+def cache_path(symbol, start_ts, analysis_ts, period):
+    CACHE_DIR.mkdir(exist_ok=True)
+    return CACHE_DIR / f"{symbol}_{period}_{start_ts.strftime('%Y%m%d')}_{analysis_ts.strftime('%Y%m%d')}.csv"
+
+
+def fetch_cached(fetcher, symbol, start_ts, analysis_ts, period, label):
+    path = cache_path(symbol, start_ts, analysis_ts, period)
+    try:
+        df = fetch_with_retry(fetcher, symbol, start_ts, analysis_ts, label)
+        df.to_csv(path, index=False, encoding="utf-8-sig")
+        return df
+    except Exception:
+        if path.exists():
+            from support_resistance_trainer import load_csv
+
+            return load_csv(path)
+        raise
 
 
 class TradingAdviceHandler(SimpleHTTPRequestHandler):
@@ -17,6 +72,13 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(204)
         self.end_headers()
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/random-training-sample":
+            self.write_json(200, self.random_training_sample())
+            return
+        super().do_GET()
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -35,8 +97,8 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
             analysis_ts = parse_date(analysis_date)
             years = int(payload.get("years", 3))
             start_ts = analysis_ts - pd.DateOffset(years=years + 1)
-            df = fetch_akshare_weekly(symbol, start_ts, analysis_ts)
-            daily_df = fetch_akshare_daily(symbol, start_ts, analysis_ts)
+            df = fetch_cached(fetch_akshare_weekly, symbol, start_ts, analysis_ts, "weekly", "周线")
+            daily_df = fetch_cached(fetch_akshare_daily, symbol, start_ts, analysis_ts, "daily", "日线")
             if df.empty:
                 raise ValueError(f"AKShare did not return weekly data for {symbol}. Check the stock code and date.")
             result = analyze(
@@ -53,6 +115,15 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
             self.write_json(200, result)
         except Exception as exc:
             self.write_json(400, {"error": str(exc)})
+
+    def random_training_sample(self):
+        start = pd.Timestamp("2024-01-01")
+        end = pd.Timestamp.today().normalize() - pd.Timedelta(days=7)
+        offset = random.randint(0, max((end - start).days, 1))
+        return {
+            "symbol": random.choice(RANDOM_SYMBOLS),
+            "date": (start + pd.Timedelta(days=offset)).strftime("%Y-%m-%d"),
+        }
 
     def write_json(self, status, data):
         body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")

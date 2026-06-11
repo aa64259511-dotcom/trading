@@ -440,6 +440,45 @@ canvas {
   margin-top: 16px;
 }
 
+.action-stack {
+  display: grid;
+  gap: 12px;
+  margin-top: 22px;
+}
+
+.inline-fetch {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 136px;
+  gap: 10px;
+  align-items: end;
+}
+
+.inline-fetch .secondary-button {
+  margin-top: 0;
+}
+
+.compact-grid {
+  margin-top: 18px;
+}
+
+.correction-panel {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.small-header h3 {
+  font-size: 16px;
+}
+
+.small-header p {
+  margin-bottom: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 .primary-button,
 .secondary-button {
   width: 100%;
@@ -574,6 +613,10 @@ canvas {
   .field-grid,
   .metrics-strip,
   .weight-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .inline-fetch {
     grid-template-columns: 1fr;
   }
 

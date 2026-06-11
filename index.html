@@ -101,13 +101,19 @@
               <div class="form-header">
                 <div>
                   <h2>支撑压力训练</h2>
-                  <p>输入股票代码和分析日期，使用该日期之前3年周线拟合价格区间</p>
+                  <p>随机训练样本，或输入股票代码直接拉取真实数据</p>
                 </div>
-                <button class="ghost-button" id="trainingSample" type="button">示例</button>
               </div>
 
-              <div class="field-grid">
-                <label>股票代码 <input id="trainSymbol" type="text" value="000001" /></label>
+              <div class="action-stack">
+                <button class="primary-button" id="randomTraining" type="button">随机训练</button>
+                <div class="inline-fetch">
+                  <label>股票代码 <input id="trainSymbol" type="text" value="000001" /></label>
+                  <button class="secondary-button" id="fetchRealTraining" type="button">按代码拉取</button>
+                </div>
+              </div>
+
+              <div class="field-grid compact-grid">
                 <label>分析日期 <input id="trainDate" type="date" value="2026-06-11" /></label>
                 <label>聚类容差 % <input id="clusterPct" type="number" min="0.3" step="0.1" value="1.5" /></label>
                 <label>实体分桶 % <input id="bodyBinPct" type="number" min="0.3" step="0.1" value="1.0" /></label>
@@ -115,19 +121,21 @@
                 <label>验证反应 % <input id="reactionPct" type="number" min="1" step="0.5" value="3" /></label>
               </div>
 
-              <label class="wide-label">
-                人工纠正价格
-                <textarea id="correctionsInput" rows="5">support: 10.7
-resistance: 11.4</textarea>
-              </label>
+              <div class="correction-panel hidden" id="correctionPanel">
+                <div class="form-header small-header">
+                  <div>
+                    <h3>人工修正</h3>
+                    <p>修改后系统会按修正价格重新拟合规则权重</p>
+                  </div>
+                </div>
+                <div class="field-grid">
+                  <label>修正支撑 <input id="manualSupport" type="number" min="0" step="0.01" /></label>
+                  <label>修正压力 <input id="manualResistance" type="number" min="0" step="0.01" /></label>
+                </div>
+                <button class="secondary-button" id="refitTraining" type="button">按修正重新拟合</button>
+              </div>
 
-              <label class="wide-label">
-                周线CSV数据
-                <textarea id="weeklyCsvInput" rows="10"></textarea>
-              </label>
-
-              <button class="primary-button" id="fetchRealTraining" type="button">拉取真实数据并拟合</button>
-              <button class="secondary-button" id="runTraining" type="button">使用CSV拟合</button>
+              <textarea class="hidden" id="weeklyCsvInput" rows="1"></textarea>
             </form>
 
             <section class="result-panel training-result" aria-live="polite">
