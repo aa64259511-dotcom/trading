@@ -440,20 +440,35 @@ canvas {
   margin-top: 16px;
 }
 
-.primary-button {
+.primary-button,
+.secondary-button {
   width: 100%;
   min-height: 44px;
   margin-top: 16px;
-  border: 0;
+  border: 1px solid transparent;
   border-radius: 6px;
-  background: var(--blue);
-  color: #fff;
   font-weight: 800;
   cursor: pointer;
 }
 
+.primary-button {
+  background: var(--blue);
+  color: #fff;
+}
+
+.secondary-button {
+  margin-top: 10px;
+  background: #fff;
+  border-color: var(--line);
+  color: var(--blue);
+}
+
 .primary-button:hover {
   filter: brightness(0.96);
+}
+
+.secondary-button:hover {
+  border-color: var(--blue);
 }
 
 .training-result {

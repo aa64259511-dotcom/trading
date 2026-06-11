@@ -521,6 +521,19 @@ function parseCorrections(text) {
   }).filter((item) => Number.isFinite(item.price));
 }
 
+function getTrainingOptions() {
+  return {
+    symbol: document.querySelector("#trainSymbol").value.trim(),
+    date: document.querySelector("#trainDate").value,
+    years: 3,
+    clusterPct: Number(document.querySelector("#clusterPct").value) / 100,
+    bodyBinPct: Number(document.querySelector("#bodyBinPct").value) / 100,
+    swingWindow: Number(document.querySelector("#swingWindow").value),
+    reactionPct: Number(document.querySelector("#reactionPct").value) / 100,
+    corrections: parseCorrections(document.querySelector("#correctionsInput").value),
+  };
+}
+
 function tolerance(price, pct) {
   return Math.max(price * pct, 0.01);
 }
@@ -674,7 +687,8 @@ function fitWeights(rows, zones, corrections, reactionPct) {
 function runTraining() {
   try {
     const rows = parseCsv(document.querySelector("#weeklyCsvInput").value);
-    const analysisDate = new Date(document.querySelector("#trainDate").value);
+    const options = getTrainingOptions();
+    const analysisDate = new Date(options.date);
     const startDate = new Date(analysisDate);
     startDate.setFullYear(startDate.getFullYear() - 3);
     const filtered = rows.filter((row) => {
@@ -683,11 +697,11 @@ function runTraining() {
     });
     if (filtered.length < 30) throw new Error("分析日期之前3年的周线数量不足，至少需要30根。");
 
-    const clusterPct = Number(document.querySelector("#clusterPct").value) / 100;
-    const bodyBinPct = Number(document.querySelector("#bodyBinPct").value) / 100;
-    const reactionPct = Number(document.querySelector("#reactionPct").value) / 100;
-    const swingWindow = Number(document.querySelector("#swingWindow").value);
-    const corrections = parseCorrections(document.querySelector("#correctionsInput").value);
+    const clusterPct = options.clusterPct;
+    const bodyBinPct = options.bodyBinPct;
+    const reactionPct = options.reactionPct;
+    const swingWindow = options.swingWindow;
+    const corrections = options.corrections;
     const swingZones = clusterPoints(findSwings(filtered, swingWindow), clusterPct).map((zone) => ({
       ...zone,
       low: zone.low * (1 - clusterPct / 2),
@@ -703,6 +717,32 @@ function runTraining() {
   } catch (error) {
     document.querySelector("#trainingTitle").textContent = "训练失败";
     document.querySelector("#levelTable").innerHTML = `<div class="decision negative"><span class="decision-level">输入数据有问题</span><p>${error.message}</p></div>`;
+  }
+}
+
+async function fetchRealTraining() {
+  const button = document.querySelector("#fetchRealTraining");
+  const previousText = button.textContent;
+  try {
+    const options = getTrainingOptions();
+    if (!options.symbol || !options.date) throw new Error("请填写股票代码和分析日期。");
+    button.disabled = true;
+    button.textContent = "正在拉取真实数据...";
+    document.querySelector("#trainingTitle").textContent = "正在拉取 AKShare 周线数据";
+    const response = await fetch("/api/train-support-resistance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(options),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "真实数据训练失败。");
+    renderServerTrainingResult(data);
+  } catch (error) {
+    document.querySelector("#trainingTitle").textContent = "训练失败";
+    document.querySelector("#levelTable").innerHTML = `<div class="decision negative"><span class="decision-level">真实数据接口有问题</span><p>${error.message}</p></div>`;
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
   }
 }
 
@@ -724,6 +764,26 @@ function renderTrainingResult(result) {
   `).join("");
 }
 
+function renderServerTrainingResult(result) {
+  const levels = result.levels || [];
+  const sourceLabel = (source) => ({ body_cluster: "实体密集区", swing_cluster: "波段聚类" }[source] || source);
+  document.querySelector("#trainingTitle").textContent = `${document.querySelector("#trainSymbol").value}：${result.trainingStart} 至 ${result.trainingEnd}，共 ${result.weeks} 周`;
+  document.querySelector("#trainCurrentPrice").textContent = formatPrice(result.currentPrice);
+  document.querySelector("#trainSupport").textContent = result.nearest?.support ? `${formatPrice(result.nearest.support.low)} - ${formatPrice(result.nearest.support.high)}` : "--";
+  document.querySelector("#trainResistance").textContent = result.nearest?.resistance ? `${formatPrice(result.nearest.resistance.low)} - ${formatPrice(result.nearest.resistance.high)}` : "--";
+  document.querySelector("#fitError").textContent = result.fitError === null ? "未输入纠正价格" : `拟合误差 ${(result.fitError * 100).toFixed(2)}%`;
+  document.querySelector("#weightGrid").innerHTML = Object.entries(result.weights || {}).map(([key, value]) => {
+    const label = { swing: "历史高低点", recent: "近期验证", body: "实体密集区", recency: "时间近度" }[key] || key;
+    return `<div><span>${label}</span><strong>${Math.round(value * 100)}%</strong></div>`;
+  }).join("");
+  document.querySelector("#levelTable").innerHTML = levels.slice(0, 10).map((level) => `
+    <article class="level-row ${level.type}">
+      <div><strong>${level.type === "support" ? "支撑" : "压力"} ${formatPrice(level.low)} - ${formatPrice(level.high)}</strong><p>${level.sources.map(sourceLabel).join(" / ")}，触碰 ${level.touches} 次</p></div>
+      <span>${level.strength.toFixed(1)} 分</span>
+    </article>
+  `).join("");
+}
+
 document.querySelectorAll("input").forEach((input) => {
   input.addEventListener("input", render);
   input.addEventListener("change", render);
@@ -735,11 +795,14 @@ document.querySelectorAll(".tab-button").forEach((button) => {
 
 document.querySelector("#loadSample").addEventListener("click", () => loadSample());
 document.querySelector("#trainingSample").addEventListener("click", () => {
+  document.querySelector("#trainSymbol").value = "000001";
+  document.querySelector("#trainDate").value = "2025-06-11";
   document.querySelector("#weeklyCsvInput").value = sampleWeeklyCsv;
   document.querySelector("#correctionsInput").value = "support: 29.6\nresistance: 31.8";
   runTraining();
 });
 document.querySelector("#runTraining").addEventListener("click", runTraining);
+document.querySelector("#fetchRealTraining").addEventListener("click", fetchRealTraining);
 document.querySelector("#weeklyCsvInput").value = sampleWeeklyCsv;
 
 render();
