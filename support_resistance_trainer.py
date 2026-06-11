@@ -25,6 +25,8 @@ class Level:
     recency_score: float
     touches: int
     sources: list[str]
+    timeframe: str = "weekly"
+    weekly_zone: dict | None = None
 
 
 def parse_date(value: str) -> pd.Timestamp:
@@ -73,6 +75,22 @@ def fetch_akshare_weekly(symbol: str, start: pd.Timestamp, end: pd.Timestamp) ->
     raw = ak.stock_zh_a_hist(
         symbol=symbol,
         period="weekly",
+        start_date=start.strftime("%Y%m%d"),
+        end_date=end.strftime("%Y%m%d"),
+        adjust="qfq",
+    )
+    return normalize_columns(raw)
+
+
+def fetch_akshare_daily(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    try:
+        import akshare as ak
+    except ImportError as exc:
+        raise RuntimeError("AKShare is not installed. Use --csv, or install akshare first.") from exc
+
+    raw = ak.stock_zh_a_hist(
+        symbol=symbol,
+        period="daily",
         start_date=start.strftime("%Y%m%d"),
         end_date=end.strftime("%Y%m%d"),
         adjust="qfq",
@@ -325,6 +343,86 @@ def fit_weights(df: pd.DataFrame, zones: list[dict], corrections: list[dict], to
     return min(candidates, key=lambda item: item[0])[1]
 
 
+def refine_levels_with_daily(
+    weekly_levels: list[Level],
+    daily_df: pd.DataFrame | None,
+    analysis_date: str,
+    years: int,
+    body_bin_pct: float,
+    cluster_pct: float,
+    reaction_pct: float,
+) -> list[Level]:
+    if daily_df is None or daily_df.empty:
+        return weekly_levels
+
+    analysis_ts = parse_date(analysis_date)
+    daily_window = daily_df[(daily_df["date"] < analysis_ts) & (daily_df["date"] >= analysis_ts - pd.DateOffset(years=years))].copy()
+    if len(daily_window) < 60:
+        return weekly_levels
+
+    daily_zones = body_contact_bins(daily_window, body_bin_pct / 2, top_n=60)
+    daily_swings = cluster_points(find_swings(daily_window, window=5), cluster_pct / 2)
+    daily_zones.extend(
+        {
+            "type": cluster["type"],
+            "low": cluster["low"] * (1 - cluster_pct / 4),
+            "high": cluster["high"] * (1 + cluster_pct / 4),
+            "mid": cluster["mid"],
+            "source": "daily_swing_cluster",
+            "points": cluster["points"],
+            "body_count": 0,
+        }
+        for cluster in daily_swings
+    )
+    daily_zones = merge_zones(daily_zones, cluster_pct / 2)
+    max_body = max((zone.get("body_count", 0) for zone in daily_zones), default=1) or 1
+    refined = []
+
+    for weekly in weekly_levels:
+        candidates = []
+        weekly_mid = weekly.mid
+        weekly_width = max(weekly.high - weekly.low, weekly_mid * cluster_pct)
+        search_low = weekly.low - weekly_width
+        search_high = weekly.high + weekly_width
+        for zone in daily_zones:
+            if zone["type"] != weekly.type:
+                continue
+            if zone["high"] < search_low or zone["low"] > search_high:
+                continue
+            validation_raw, touches = recent_validation_score(daily_window, zone, cluster_pct / 2, reaction_pct / 2)
+            body_score = min(zone.get("body_count", 0) / max_body, 1) * 100
+            validation_score = min(validation_raw / 12, 1) * 100
+            distance_score = max(0, 100 - abs(zone["mid"] - weekly_mid) / max(weekly_mid * cluster_pct, 0.01) * 25)
+            precision_score = body_score * 0.45 + validation_score * 0.35 + distance_score * 0.2
+            candidates.append((precision_score, touches, zone))
+
+        if not candidates:
+            refined.append(weekly)
+            continue
+
+        _, touches, best_zone = max(candidates, key=lambda item: item[0])
+        sources = sorted(set([*weekly.sources, *best_zone.get("sources", [best_zone.get("source", "daily_refine")]), "daily_refine"]))
+        refined.append(
+            Level(
+                type=weekly.type,
+                low=round(float(best_zone["low"]), 3),
+                high=round(float(best_zone["high"]), 3),
+                mid=round(float(best_zone["mid"]), 3),
+                strength=weekly.strength,
+                swing_score=weekly.swing_score,
+                recent_score=weekly.recent_score,
+                body_score=weekly.body_score,
+                recency_score=weekly.recency_score,
+                touches=max(weekly.touches, int(touches)),
+                sources=sources,
+                timeframe="daily_refined",
+                weekly_zone={"low": weekly.low, "high": weekly.high, "mid": weekly.mid},
+            )
+        )
+
+    return refined
+
+
 def analyze(
     df: pd.DataFrame,
     analysis_date: str,
@@ -334,6 +432,7 @@ def analyze(
     cluster_pct: float,
     body_bin_pct: float,
     reaction_pct: float,
+    daily_df: pd.DataFrame | None = None,
 ) -> dict:
     analysis_ts = parse_date(analysis_date)
     training_df = window_data(df, analysis_ts, years)
@@ -355,6 +454,7 @@ def analyze(
     corrections = corrections or []
     weights = fit_weights(training_df, zones, corrections, cluster_pct, reaction_pct)
     levels = score_zones(training_df, zones, weights, cluster_pct, reaction_pct)
+    levels = refine_levels_with_daily(levels, daily_df, analysis_date, years, body_bin_pct, cluster_pct, reaction_pct)
     current_price = float(training_df.iloc[-1]["close"])
     return {
         "analysisDate": analysis_date,
@@ -363,6 +463,7 @@ def analyze(
         "weeks": int(len(training_df)),
         "currentPrice": round(current_price, 3),
         "weights": {key: round(value, 3) for key, value in weights.items()},
+        "pricePrecision": "daily_refined" if daily_df is not None and not daily_df.empty else "weekly",
         "nearest": nearest_levels(levels, current_price),
         "levels": [asdict(level) for level in levels[:12]],
         "fitError": round(distance_error(levels[:8], corrections), 5) if corrections else None,

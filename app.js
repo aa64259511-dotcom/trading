@@ -771,19 +771,26 @@ function renderTrainingResult(result) {
 
 function renderServerTrainingResult(result) {
   const levels = result.levels || [];
-  const sourceLabel = (source) => ({ body_cluster: "实体密集区", swing_cluster: "波段聚类" }[source] || source);
+  const sourceLabel = (source) => ({
+    body_cluster: "实体密集区",
+    swing_cluster: "周线波段",
+    daily_refine: "日线精修",
+    daily_swing_cluster: "日线波段",
+  }[source] || source);
   document.querySelector("#trainingTitle").textContent = `${document.querySelector("#trainSymbol").value}：${result.trainingStart} 至 ${result.trainingEnd}，共 ${result.weeks} 周`;
   document.querySelector("#trainCurrentPrice").textContent = formatPrice(result.currentPrice);
   document.querySelector("#trainSupport").textContent = result.nearest?.support ? `${formatPrice(result.nearest.support.low)} - ${formatPrice(result.nearest.support.high)}` : "--";
   document.querySelector("#trainResistance").textContent = result.nearest?.resistance ? `${formatPrice(result.nearest.resistance.low)} - ${formatPrice(result.nearest.resistance.high)}` : "--";
-  document.querySelector("#fitError").textContent = result.fitError === null ? "未输入纠正价格" : `拟合误差 ${(result.fitError * 100).toFixed(2)}%`;
+  const precisionText = result.pricePrecision === "daily_refined" ? "日线精修" : "周线范围";
+  const fitText = result.fitError === null ? "未输入纠正价格" : `拟合误差 ${(result.fitError * 100).toFixed(2)}%`;
+  document.querySelector("#fitError").textContent = `${precisionText} · ${fitText}`;
   document.querySelector("#weightGrid").innerHTML = Object.entries(result.weights || {}).map(([key, value]) => {
     const label = { swing: "历史高低点", recent: "近期验证", body: "实体密集区", recency: "时间近度" }[key] || key;
     return `<div><span>${label}</span><strong>${Math.round(value * 100)}%</strong></div>`;
   }).join("");
   document.querySelector("#levelTable").innerHTML = levels.slice(0, 10).map((level) => `
     <article class="level-row ${level.type}">
-      <div><strong>${level.type === "support" ? "支撑" : "压力"} ${formatPrice(level.low)} - ${formatPrice(level.high)}</strong><p>${level.sources.map(sourceLabel).join(" / ")}，触碰 ${level.touches} 次</p></div>
+      <div><strong>${level.type === "support" ? "支撑" : "压力"} ${formatPrice(level.low)} - ${formatPrice(level.high)}</strong><p>${level.sources.map(sourceLabel).join(" / ")}，触碰 ${level.touches} 次${level.weekly_zone ? `，周线范围 ${formatPrice(level.weekly_zone.low)} - ${formatPrice(level.weekly_zone.high)}` : ""}</p></div>
       <span>${level.strength.toFixed(1)} 分</span>
     </article>
   `).join("");

@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 
 import pandas as pd
 
-from support_resistance_trainer import analyze, fetch_akshare_weekly, parse_date
+from support_resistance_trainer import analyze, fetch_akshare_daily, fetch_akshare_weekly, parse_date
 
 
 class TradingAdviceHandler(SimpleHTTPRequestHandler):
@@ -34,7 +34,9 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
 
             analysis_ts = parse_date(analysis_date)
             years = int(payload.get("years", 3))
-            df = fetch_akshare_weekly(symbol, analysis_ts - pd.DateOffset(years=years + 1), analysis_ts)
+            start_ts = analysis_ts - pd.DateOffset(years=years + 1)
+            df = fetch_akshare_weekly(symbol, start_ts, analysis_ts)
+            daily_df = fetch_akshare_daily(symbol, start_ts, analysis_ts)
             if df.empty:
                 raise ValueError(f"AKShare did not return weekly data for {symbol}. Check the stock code and date.")
             result = analyze(
@@ -46,6 +48,7 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
                 cluster_pct=float(payload.get("clusterPct", 0.015)),
                 body_bin_pct=float(payload.get("bodyBinPct", 0.01)),
                 reaction_pct=float(payload.get("reactionPct", 0.03)),
+                daily_df=daily_df,
             )
             self.write_json(200, result)
         except Exception as exc:
