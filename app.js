@@ -723,6 +723,8 @@ function runTraining() {
 async function fetchRealTraining() {
   const button = document.querySelector("#fetchRealTraining");
   const previousText = button.textContent;
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 60000);
   try {
     const options = getTrainingOptions();
     if (!options.symbol || !options.date) throw new Error("请填写股票代码和分析日期。");
@@ -733,14 +735,17 @@ async function fetchRealTraining() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(options),
+      signal: controller.signal,
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "真实数据训练失败。");
     renderServerTrainingResult(data);
   } catch (error) {
+    const message = error.name === "AbortError" ? "真实数据请求超过60秒，请稍后重试，或先用CSV拟合。" : error.message;
     document.querySelector("#trainingTitle").textContent = "训练失败";
-    document.querySelector("#levelTable").innerHTML = `<div class="decision negative"><span class="decision-level">真实数据接口有问题</span><p>${error.message}</p></div>`;
+    document.querySelector("#levelTable").innerHTML = `<div class="decision negative"><span class="decision-level">真实数据接口有问题</span><p>${message}</p></div>`;
   } finally {
+    window.clearTimeout(timeoutId);
     button.disabled = false;
     button.textContent = previousText;
   }

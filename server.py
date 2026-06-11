@@ -35,6 +35,8 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
             analysis_ts = parse_date(analysis_date)
             years = int(payload.get("years", 3))
             df = fetch_akshare_weekly(symbol, analysis_ts - pd.DateOffset(years=years + 1), analysis_ts)
+            if df.empty:
+                raise ValueError(f"AKShare did not return weekly data for {symbol}. Check the stock code and date.")
             result = analyze(
                 df=df,
                 analysis_date=analysis_date,
