@@ -37,6 +37,10 @@ let activeStrategy = "buy";
 let activeView = "buy";
 let lastTrainingResult = null;
 
+function apiUrl(path) {
+  return `${window.location.origin}${path}`;
+}
+
 const samples = {
   buy: {
     stockName: "示例科技",
@@ -744,7 +748,7 @@ async function requestTraining(options, button, loadingText) {
     button.disabled = true;
     button.textContent = loadingText;
     document.querySelector("#trainingTitle").textContent = "正在拉取 AKShare 周线和日线数据";
-    const response = await fetch("/api/train-support-resistance", {
+    const response = await fetch(apiUrl("/api/train-support-resistance"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(options),
@@ -771,17 +775,20 @@ async function randomTraining() {
   try {
     button.disabled = true;
     button.textContent = "正在抽取样本...";
-    const response = await fetch("/api/random-training-sample");
+    document.querySelector("#trainingTitle").textContent = "正在抽取随机股票和时间";
+    const response = await fetch(apiUrl("/api/random-training-sample"));
     const sample = await response.json();
     if (!response.ok) throw new Error(sample.error || "随机样本获取失败。");
     document.querySelector("#trainSymbol").value = sample.symbol;
     document.querySelector("#trainDate").value = sample.date;
     document.querySelector("#manualSupport").value = "";
     document.querySelector("#manualResistance").value = "";
+    document.querySelector("#trainingTitle").textContent = `${sample.symbol}：${sample.date}，正在计算支撑压力`;
     await requestTraining(getTrainingOptions(), button, "正在训练样本...");
   } catch (error) {
+    const message = error.message === "Failed to fetch" ? "无法连接本地服务，请确认页面地址是 http://127.0.0.1:8765/ 且服务正在运行。" : error.message;
     document.querySelector("#trainingTitle").textContent = "训练失败";
-    document.querySelector("#levelTable").innerHTML = `<div class="decision negative"><span class="decision-level">随机训练有问题</span><p>${error.message}</p></div>`;
+    document.querySelector("#levelTable").innerHTML = `<div class="decision negative"><span class="decision-level">随机训练有问题</span><p>${message}</p></div>`;
   } finally {
     button.disabled = false;
     button.textContent = previousText;

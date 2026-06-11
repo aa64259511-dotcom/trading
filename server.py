@@ -12,20 +12,16 @@ from support_resistance_trainer import analyze, fetch_akshare_daily, fetch_aksha
 
 RANDOM_SYMBOLS = [
     "000001",
-    "000002",
     "000333",
     "000651",
     "000858",
-    "002415",
     "002594",
     "300059",
     "300750",
-    "600000",
     "600036",
     "600519",
     "600887",
     "601318",
-    "601398",
 ]
 
 CACHE_DIR = Path("data_cache")
@@ -118,7 +114,7 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
 
     def random_training_sample(self):
         start = pd.Timestamp("2024-01-01")
-        end = pd.Timestamp.today().normalize() - pd.Timedelta(days=7)
+        end = min(pd.Timestamp("2026-05-31"), pd.Timestamp.today().normalize() - pd.Timedelta(days=30))
         offset = random.randint(0, max((end - start).days, 1))
         return {
             "symbol": random.choice(RANDOM_SYMBOLS),
