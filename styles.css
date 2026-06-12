@@ -117,7 +117,7 @@ h3 {
 
 .mode-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 8px;
   padding: 14px 28px;
   background: #edf1f5;
@@ -352,6 +352,8 @@ input:focus {
 .chart-header span {
   color: var(--muted);
   font-weight: 700;
+  text-align: right;
+  line-height: 1.45;
 }
 
 canvas {
@@ -415,6 +417,7 @@ canvas {
   margin-bottom: 0;
   color: var(--muted);
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .signal-points {
@@ -427,9 +430,153 @@ canvas {
   padding: 0;
 }
 
+.replay-view {
+  padding: 0;
+}
+
 .training-grid {
   display: grid;
   grid-template-columns: minmax(320px, 460px) minmax(0, 1fr);
+}
+
+.replay-layout {
+  display: block;
+}
+
+.replay-form {
+  padding: 20px 28px 26px;
+  background: #fbfcfd;
+}
+
+.replay-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.replay-topbar p {
+  margin-bottom: 0;
+  color: var(--muted);
+}
+
+.replay-fetch-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) minmax(160px, 220px) 136px;
+  gap: 12px;
+  align-items: end;
+  margin-top: 14px;
+}
+
+.decision-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.decision-entry {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+}
+
+.decision-entry label {
+  min-width: 0;
+}
+
+.decision-entry textarea {
+  min-height: 76px;
+  resize: vertical;
+}
+
+.replay-form .metrics-strip {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.decision-actions .primary-button,
+.decision-actions .secondary-button,
+.replay-fetch-row .primary-button {
+  margin-top: 0;
+}
+
+.timeframe-tabs {
+  display: inline-grid;
+  grid-template-columns: repeat(3, minmax(54px, 1fr));
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f6f8fb;
+}
+
+.timeframe-button {
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.timeframe-button.active {
+  background: #fff;
+  border-color: var(--line);
+  color: var(--blue);
+}
+
+.kline-card {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+#replayChart {
+  display: block;
+  width: 100%;
+  height: 560px;
+  margin-top: 0;
+  cursor: crosshair;
+}
+
+.replay-structure-grid {
+  grid-template-columns: 1fr;
+  margin-top: 12px;
+}
+
+.level-reason-grid {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.level-reason-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 160px) minmax(150px, 190px) minmax(260px, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.level-reason-grid textarea {
+  min-height: 54px;
+  resize: vertical;
+}
+
+.positive-text {
+  color: var(--green);
+}
+
+.negative-text {
+  color: var(--red);
 }
 
 .training-form {
@@ -461,6 +608,15 @@ canvas {
   margin-top: 18px;
 }
 
+.buy-real-panel {
+  margin-top: 18px;
+}
+
+.field-button {
+  align-self: end;
+  margin-top: 0;
+}
+
 .correction-panel {
   margin-top: 18px;
   padding: 16px;
@@ -477,6 +633,23 @@ canvas {
   margin-bottom: 0;
   color: var(--muted);
   line-height: 1.5;
+}
+
+.training-status {
+  min-height: 20px;
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.training-status.positive {
+  color: var(--green);
+}
+
+.training-status.negative {
+  color: var(--red);
 }
 
 .primary-button,
@@ -577,12 +750,35 @@ canvas {
 
 @media (max-width: 920px) {
   .content-grid,
-  .training-grid {
+  .training-grid,
+  .replay-layout {
     grid-template-columns: 1fr;
   }
 
+  .replay-topbar,
+  .replay-fetch-row,
+  .replay-structure-grid,
+  .level-reason-grid,
+  .decision-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .decision-entry {
+    grid-template-columns: 1fr;
+  }
+
+  .level-reason-row {
+    grid-template-columns: 1fr;
+  }
+
+  .replay-topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .analysis-form,
-  .training-form {
+  .training-form,
+  .replay-form {
     border-right: 0;
     border-bottom: 1px solid var(--line);
     padding-right: 28px;
@@ -605,7 +801,8 @@ canvas {
   .topbar,
   .mode-tabs,
   .analysis-form,
-  .result-panel {
+  .result-panel,
+  .replay-form {
     padding-left: 16px;
     padding-right: 16px;
   }
@@ -621,6 +818,10 @@ canvas {
   }
 
   .mode-tabs {
+    grid-template-columns: 1fr;
+  }
+
+  .decision-actions {
     grid-template-columns: 1fr;
   }
 

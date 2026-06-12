@@ -3,28 +3,22 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>股票策略分析</title>
+    <title>交易思维训练</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <main class="app-shell">
-      <section class="workspace" aria-label="股票策略分析工作台">
+      <section class="workspace" aria-label="交易思维训练工作台">
         <header class="topbar">
           <div>
-            <p class="eyebrow">Stock Strategy Desk</p>
-            <h1>股票策略分析</h1>
+            <p class="eyebrow">Trade Mind Trainer</p>
+            <h1>交易思维训练</h1>
           </div>
           <div class="market-pulse" aria-label="市场状态">
             <span class="pulse-dot"></span>
             <span id="marketState">等待输入</span>
           </div>
         </header>
-
-        <div class="mode-tabs" role="tablist" aria-label="功能类型">
-          <button class="tab-button active" type="button" data-view="buy" role="tab" aria-selected="true">买入策略</button>
-          <button class="tab-button" type="button" data-view="sell" role="tab" aria-selected="false">卖出策略</button>
-          <button class="tab-button" type="button" data-view="training" role="tab" aria-selected="false">支撑压力训练</button>
-        </div>
 
         <section class="content-grid strategy-view" id="strategyView">
           <form class="analysis-form" id="analysisForm">
@@ -36,7 +30,21 @@
               <button class="ghost-button" id="loadSample" type="button">示例</button>
             </div>
 
-            <div class="field-grid">
+            <div class="buy-real-panel" id="buyRealPanel">
+              <div class="inline-fetch">
+                <label>股票代码 <input id="buySymbol" type="text" value="000001" autocomplete="off" /></label>
+                <button class="primary-button" id="fetchBuyAnalysis" type="button">拉取买入分析</button>
+              </div>
+              <div class="field-grid compact-grid">
+                <label>分析日期 <input id="buyDate" type="date" /></label>
+                <label>修正支撑 <input id="buyManualSupport" type="number" min="0" step="0.01" /></label>
+                <label>修正压力 <input id="buyManualResistance" type="number" min="0" step="0.01" /></label>
+                <button class="secondary-button field-button" id="recalcBuyRisk" type="button">按修正重新计算盈亏比</button>
+              </div>
+              <p class="training-status" id="buyStatus" role="status" aria-live="polite"></p>
+            </div>
+
+            <div class="field-grid legacy-fields" id="legacyFields">
               <label>股票名称 <input id="stockName" type="text" value="示例科技" autocomplete="off" /></label>
               <label>当前价格 <input id="price" type="number" min="0" step="0.01" value="28.60" /></label>
               <label>5日均线 <input id="ma5" type="number" min="0" step="0.01" value="28.10" /></label>
@@ -83,14 +91,6 @@
               <div><span>目标位</span><strong id="targetPrice">--</strong></div>
             </div>
 
-            <div class="chart-card">
-              <div class="chart-header">
-                <h3>价格结构</h3>
-                <span id="trendLabel">--</span>
-              </div>
-              <canvas id="signalChart" width="720" height="260"></canvas>
-            </div>
-
             <div class="signal-list" id="signalList"></div>
           </section>
         </section>
@@ -114,7 +114,7 @@
               </div>
 
               <div class="field-grid compact-grid">
-                <label>分析日期 <input id="trainDate" type="date" value="2026-06-11" /></label>
+                <label>分析日期 <input id="trainDate" type="date" /></label>
                 <label>聚类容差 % <input id="clusterPct" type="number" min="0.3" step="0.1" value="1.5" /></label>
                 <label>实体分桶 % <input id="bodyBinPct" type="number" min="0.3" step="0.1" value="1.0" /></label>
                 <label>波段窗口 <input id="swingWindow" type="number" min="2" max="8" step="1" value="3" /></label>
@@ -143,6 +143,7 @@
                 <div>
                   <p class="eyebrow">Support Resistance Trainer</p>
                   <h2 id="trainingTitle">等待训练</h2>
+                  <p class="training-status" id="trainingStatus" role="status" aria-live="polite"></p>
                 </div>
               </div>
 
@@ -162,6 +163,98 @@
 
               <div class="level-table" id="levelTable"></div>
             </section>
+          </div>
+        </section>
+
+        <section class="replay-view" id="replayView">
+          <div class="replay-layout">
+            <form class="replay-form" id="replayForm">
+              <div class="replay-topbar">
+                <div>
+                  <h2 id="replayTitle">交易思维训练</h2>
+                  <p>只显示当前日期之前的K线，逐根推进并保存决策样本</p>
+                </div>
+                <div class="timeframe-tabs" role="tablist" aria-label="K线周期">
+                  <button class="timeframe-button active" type="button" data-frame="daily">日线</button>
+                  <button class="timeframe-button" type="button" data-frame="weekly">周线</button>
+                  <button class="timeframe-button" type="button" data-frame="monthly">月线</button>
+                </div>
+              </div>
+
+              <div class="replay-fetch-row">
+                <label>股票代码 <input id="replaySymbol" type="text" value="002460" autocomplete="off" /></label>
+                <label>开始日期 <input id="replayDate" type="date" /></label>
+                <button class="primary-button" id="startReplay" type="button">开始训练</button>
+              </div>
+
+              <div class="metrics-strip">
+                <div><span>当前日期</span><strong id="replayCurrentDate">--</strong></div>
+                <div><span>收盘价</span><strong id="replayClose">--</strong></div>
+                <div><span>买入价</span><strong id="replayEntryPrice">--</strong></div>
+                <div><span>当前收益率</span><strong id="replayReturn">--</strong></div>
+              </div>
+
+              <div class="kline-card">
+                <canvas id="replayChart" width="1280" height="560"></canvas>
+              </div>
+
+              <div class="field-grid replay-structure-grid">
+                <label>趋势结构判断 <input id="replayStructure" type="text" placeholder="如：上升趋势中的大调整" /></label>
+              </div>
+
+              <div class="decision-actions">
+                <div class="decision-entry">
+                  <button class="primary-button" id="replayBuy" type="button">买入</button>
+                  <label>买入理由 <textarea id="replayBuyReason" placeholder="点击买入前填写"></textarea></label>
+                </div>
+                <div class="decision-entry">
+                  <button class="secondary-button" id="replaySell" type="button" disabled>卖出</button>
+                  <label>卖出理由 <textarea id="replaySellReason" placeholder="点击卖出前填写"></textarea></label>
+                </div>
+                <div class="decision-entry">
+                  <button class="secondary-button" id="replayHold" type="button">观望</button>
+                  <label>备注 <textarea id="replayHoldNote" placeholder="记录这个交易日需要备注的信息"></textarea></label>
+                </div>
+              </div>
+
+              <div class="level-reason-grid">
+                <div class="level-reason-row support-row">
+                  <label>支撑位 <input id="replaySupport" type="number" min="0" step="0.01" /></label>
+                  <label>
+                    支撑类型
+                    <select id="replaySupportEvidence">
+                      <option value="">未选择</option>
+                      <option value="previous_low">前低</option>
+                      <option value="multi_touch">多次触碰</option>
+                      <option value="body_cluster">K线实体密集区</option>
+                      <option value="breakdown_reclaim">跌破后拉回</option>
+                      <option value="platform_lower">平台下沿</option>
+                      <option value="volume_area">成交密集区</option>
+                    </select>
+                  </label>
+                  <label>支撑原因 <textarea id="replaySupportReason" placeholder="说明为什么把这里标为支撑"></textarea></label>
+                </div>
+                <div class="level-reason-row resistance-row">
+                  <label>压力位 <input id="replayResistance" type="number" min="0" step="0.01" /></label>
+                  <label>
+                    压力类型
+                    <select id="replayResistanceEvidence">
+                      <option value="">未选择</option>
+                      <option value="previous_high">前高</option>
+                      <option value="multi_touch">多次触碰</option>
+                      <option value="body_cluster">K线实体密集区</option>
+                      <option value="failed_breakout">突破失败</option>
+                      <option value="platform_upper">平台上沿</option>
+                      <option value="volume_area">成交密集区</option>
+                    </select>
+                  </label>
+                  <label>压力原因 <textarea id="replayResistanceReason" placeholder="说明为什么把这里标为压力"></textarea></label>
+                </div>
+              </div>
+
+              <p class="training-status" id="replayStatus" role="status" aria-live="polite"></p>
+              <div class="level-table" id="replayLog"></div>
+            </form>
           </div>
         </section>
       </section>

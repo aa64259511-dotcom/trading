@@ -27,15 +27,26 @@ const output = {
   stopLoss: document.querySelector("#stopLoss"),
   targetPrice: document.querySelector("#targetPrice"),
   signalList: document.querySelector("#signalList"),
-  trendLabel: document.querySelector("#trendLabel"),
   marketState: document.querySelector("#marketState"),
 };
 
 const canvas = document.querySelector("#signalChart");
-const ctx = canvas.getContext("2d");
+const ctx = canvas ? canvas.getContext("2d") : null;
 let activeStrategy = "buy";
-let activeView = "buy";
+let activeView = "replay";
 let lastTrainingResult = null;
+let lastBuyAnalysis = null;
+let replayState = {
+  data: null,
+  frame: "daily",
+  cursor: 0,
+  position: null,
+  log: [],
+  visibleCount: 120,
+  hoverIndex: null,
+  hoverY: null,
+  selectedNoteDate: null,
+};
 
 function apiUrl(path) {
   return `${window.location.origin}${path}`;
@@ -415,6 +426,7 @@ function renderSignals(signals) {
 }
 
 function drawChart(data) {
+  if (!canvas || !ctx) return;
   const width = canvas.width;
   const height = canvas.height;
   ctx.clearRect(0, 0, width, height);
@@ -461,7 +473,601 @@ function drawChart(data) {
   });
 }
 
+function formatLevel(level) {
+  if (!level) return "--";
+  return `${formatPrice(level.low)} - ${formatPrice(level.high)}`;
+}
+
+function buySignalType(result) {
+  if (result.model?.worthBuying) return "positive";
+  if (result.model?.modelHit) return "neutral";
+  return "negative";
+}
+
+function buildBuySignals(result) {
+  const model = result.model || {};
+  const trend = result.trend || {};
+  const phase = result.phase || {};
+  const rr = model.riskReward == null ? "--" : `${model.riskReward}`;
+  const waitPattern = model.waitPattern || {};
+  const waitItems = Array.isArray(waitPattern.items) ? waitPattern.items.join("；") : "等待支撑踩稳、突破交易密集区或头肩底等结构确认。";
+  const supportText = formatLevel(result.support);
+  const resistanceText = formatLevel(result.resistance);
+  return [
+    buildSignal(
+      phase.majorTrend === "uptrend" ? "positive" : phase.majorTrend === "downtrend" ? "negative" : "neutral",
+      phase.label || trend.label || "当前阶段",
+      phase.detail || trend.detail || "等待阶段数据。",
+      phase.majorTrend === "uptrend" ? 18 : phase.majorTrend === "range" ? 8 : -8,
+    ),
+    buildSignal(
+      "neutral",
+      "关键价格位置",
+      `当前价 ${formatPrice(result.currentPrice)}；当前支撑 ${supportText}；当前压力 ${resistanceText}；近期关键低点 ${formatPrice(phase.recentKeyLow || 0)}；近30周关键低点 ${formatPrice(phase.weeklyKeyLow || 0)}；阶段回撤 ${phase.drawdownPct ?? "--"}%。`,
+      0,
+    ),
+    buildSignal(
+      "neutral",
+      waitPattern.label || "需要等待的结构形态",
+      waitItems,
+      0,
+    ),
+    buildSignal(
+      model.modelHit ? "positive" : "neutral",
+      model.model || "买入模型",
+      model.modelDetail || "等待模型确认。",
+      model.modelHit ? 28 : 0,
+    ),
+    buildSignal(
+      model.riskReward >= 3 ? "positive" : "negative",
+      `盈亏比 ${rr}`,
+      model.riskReward >= 3 ? "止损到上方压力的空间满足大于3的要求。" : "上方压力与止损之间的空间暂不满足大于3的要求。",
+      model.riskReward >= 3 ? 24 : -12,
+    ),
+  ];
+}
+
+function renderBuyAnalysis(result) {
+  lastBuyAnalysis = result;
+  const model = result.model || {};
+  const type = buySignalType(result);
+  output.strategyLabel.textContent = "买入策略";
+  output.stockTitle.textContent = `${result.symbol} · ${result.analysisDate}`;
+  output.scoreValue.textContent = model.score ?? 0;
+  output.decisionLevel.textContent = result.phase?.label || model.decision || "等待分析";
+  output.decisionText.textContent = `${model.decision || "结论"}：${model.model || "模型"}，${model.modelDetail || ""}`;
+  output.entryRange.textContent = model.entryPrice ? formatPrice(model.entryPrice) : "--";
+  output.stopLoss.textContent = model.stopLoss ? `${formatPrice(model.stopLoss)} · ${model.stopBasis}` : "--";
+  output.targetPrice.textContent = model.targetPrice ? `${formatPrice(model.targetPrice)} · 盈亏比 ${model.riskReward ?? "--"}` : "--";
+  output.marketState.textContent = `买入评分 ${model.score ?? 0}`;
+  updateDecisionStyle(type);
+  renderSignals(buildBuySignals(result));
+  drawChart({
+    support: result.support?.mid || result.currentPrice * 0.95,
+    ma60: result.support?.high || result.currentPrice * 0.97,
+    ma20: result.currentPrice,
+    ma5: model.entryPrice || result.currentPrice,
+    price: result.currentPrice,
+    resistance: result.resistance?.mid || result.currentPrice * 1.06,
+  });
+  const supportInput = document.querySelector("#buyManualSupport");
+  const resistanceInput = document.querySelector("#buyManualResistance");
+  if (supportInput && !supportInput.value && result.support) supportInput.value = formatPrice(result.support.mid);
+  if (resistanceInput && !resistanceInput.value && result.resistance) resistanceInput.value = formatPrice(result.resistance.mid);
+  setStatus("#buyStatus", `当前价 ${formatPrice(result.currentPrice)}，支撑 ${formatLevel(result.support)}，压力 ${formatLevel(result.resistance)}`, type);
+}
+
+async function requestBuyAnalysis(successText = "买入分析完成") {
+  const button = document.querySelector("#fetchBuyAnalysis");
+  const previousText = button?.textContent;
+  const payload = {
+    symbol: document.querySelector("#buySymbol").value.trim(),
+    date: document.querySelector("#buyDate").value,
+    supportCorrection: Number(document.querySelector("#buyManualSupport").value) || 0,
+    resistanceCorrection: Number(document.querySelector("#buyManualResistance").value) || 0,
+  };
+  try {
+    if (!payload.symbol || !payload.date) throw new Error("请填写股票代码和分析日期。");
+    if (button) {
+      button.disabled = true;
+      button.textContent = "正在拉取真实数据...";
+    }
+    setStatus("#buyStatus", "正在拉取日线、周线并计算买入模型...", "neutral");
+    const response = await fetch(apiUrl("/api/buy-analysis"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "买入分析失败。");
+    renderBuyAnalysis(data);
+    setStatus("#buyStatus", successText, buySignalType(data));
+  } catch (error) {
+    setStatus("#buyStatus", error.message, "negative");
+    output.decisionLevel.textContent = "分析失败";
+    output.decisionText.textContent = error.message;
+    updateDecisionStyle("negative");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = previousText;
+    }
+  }
+}
+
+async function recalcBuyRisk() {
+  await requestBuyAnalysis("已按修正支撑压力重新计算盈亏比");
+}
+
+function replayDailyCursorDate() {
+  const candles = replayState.data?.timeframes?.daily || [];
+  return candles[replayState.cursor]?.date || "";
+}
+
+function currentReplayCandle() {
+  const candles = replayState.data?.timeframes?.daily || [];
+  return candles[replayState.cursor] || null;
+}
+
+function replayVisibleCandles() {
+  if (!replayState.data) return [];
+  const candles = replayState.data.timeframes[replayState.frame] || [];
+  const cursorDate = replayDailyCursorDate();
+  const visible = candles.filter((item) => item.date <= cursorDate);
+  return visible.slice(-replayState.visibleCount);
+}
+
+function sma(values, period) {
+  return values.map((_, index) => {
+    if (index + 1 < period) return null;
+    const slice = values.slice(index - period + 1, index + 1);
+    return slice.reduce((sum, value) => sum + value, 0) / period;
+  });
+}
+
+function ema(values, period) {
+  const factor = 2 / (period + 1);
+  const result = [];
+  let previous = null;
+  values.forEach((value) => {
+    previous = previous === null ? value : value * factor + previous * (1 - factor);
+    result.push(previous);
+  });
+  return result;
+}
+
+function macdSeries(candles) {
+  const closes = candles.map((item) => item.close);
+  const ema12 = ema(closes, 12);
+  const ema26 = ema(closes, 26);
+  const dif = closes.map((_, index) => ema12[index] - ema26[index]);
+  const dea = ema(dif, 9);
+  const hist = dif.map((value, index) => (value - dea[index]) * 2);
+  return { dif, dea, hist };
+}
+
+function replayAnnotationMap() {
+  const notes = new Map();
+  replayState.log.forEach((item) => {
+    const text = item.action === "hold" ? item.note : item.note || item.reason;
+    if (!text) return;
+    const existing = notes.get(item.date) || [];
+    existing.push({ ...item, annotationText: text });
+    notes.set(item.date, existing);
+  });
+  return notes;
+}
+
+function replayActionLabel(action) {
+  return action === "buy" ? "买入" : action === "sell" ? "卖出" : "观望";
+}
+
+function drawReplayChart() {
+  const canvas = document.querySelector("#replayChart");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const width = canvas.width;
+  const height = canvas.height;
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  const candles = replayVisibleCandles();
+  if (!candles.length) {
+    ctx.fillStyle = "#647284";
+    ctx.font = "16px Microsoft YaHei, sans-serif";
+    ctx.fillText("等待加载K线数据", 24, 40);
+    return;
+  }
+
+  const support = Number(document.querySelector("#replaySupport")?.value) || 0;
+  const resistance = Number(document.querySelector("#replayResistance")?.value) || 0;
+  const prices = candles.flatMap((item) => [item.high, item.low]);
+  if (support > 0) prices.push(support);
+  if (resistance > 0) prices.push(resistance);
+  const min = Math.min(...prices) * 0.98;
+  const max = Math.max(...prices) * 1.02;
+  const priceTop = 24;
+  const priceBottom = Math.round(height * 0.62);
+  const volumeTop = priceBottom + 18;
+  const volumeBottom = Math.round(height * 0.78);
+  const macdTop = volumeBottom + 20;
+  const macdBottom = height - 48;
+  const chartHeight = priceBottom - priceTop;
+  const y = (value) => priceBottom - ((value - min) / (max - min || 1)) * chartHeight;
+  const step = Math.max((width - 64) / candles.length, 4);
+  const bodyWidth = Math.max(Math.min(step * 0.62, 10), 3);
+
+  ctx.strokeStyle = "#edf1f5";
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i += 1) {
+    const gy = priceTop + i * (chartHeight / 4);
+    ctx.beginPath();
+    ctx.moveTo(44, gy);
+    ctx.lineTo(width - 20, gy);
+    ctx.stroke();
+  }
+
+  function drawLevel(price, color, label) {
+    if (price <= 0) return;
+    const ly = y(price);
+    ctx.strokeStyle = color;
+    ctx.setLineDash([6, 5]);
+    ctx.beginPath();
+    ctx.moveTo(44, ly);
+    ctx.lineTo(width - 20, ly);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ctx.font = "12px Microsoft YaHei, sans-serif";
+    ctx.fillText(`${label} ${formatPrice(price)}`, 48, Math.max(14, ly - 6));
+  }
+
+  drawLevel(support, "#16865a", "支撑");
+  drawLevel(resistance, "#c2413b", "压力");
+
+  const closes = candles.map((item) => item.close);
+  const ma5 = sma(closes, 5);
+  const ma10 = sma(closes, 10);
+
+  function drawLine(values, color, label) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    let started = false;
+    values.forEach((value, index) => {
+      if (value === null) return;
+      const x = 48 + index * step;
+      const py = y(value);
+      if (!started) {
+        ctx.moveTo(x, py);
+        started = true;
+      } else {
+        ctx.lineTo(x, py);
+      }
+    });
+    if (started) ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.font = "12px Microsoft YaHei, sans-serif";
+    ctx.fillText(label, label === "MA5" ? 48 : 94, 16);
+  }
+
+  candles.forEach((item, index) => {
+    const x = 48 + index * step;
+    const up = item.close >= item.open;
+    const color = up ? "#c2413b" : "#16865a";
+    ctx.strokeStyle = color;
+    ctx.fillStyle = up ? "#fff" : color;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(x, y(item.high));
+    ctx.lineTo(x, y(item.low));
+    ctx.stroke();
+    const openY = y(item.open);
+    const closeY = y(item.close);
+    const bodyTop = Math.min(openY, closeY);
+    const bodyHeight = Math.max(Math.abs(openY - closeY), 2);
+    ctx.strokeRect(x - bodyWidth / 2, bodyTop, bodyWidth, bodyHeight);
+    if (!up) ctx.fillRect(x - bodyWidth / 2, bodyTop, bodyWidth, bodyHeight);
+  });
+
+  drawLine(ma5, "#b7791f", "MA5");
+  drawLine(ma10, "#2369b8", "MA10");
+
+  const maxVolume = Math.max(...candles.map((item) => item.volume || 0), 1);
+  candles.forEach((item, index) => {
+    const x = 48 + index * step;
+    const barHeight = ((item.volume || 0) / maxVolume) * (volumeBottom - volumeTop);
+    ctx.fillStyle = item.close >= item.open ? "rgba(194, 65, 59, 0.45)" : "rgba(22, 134, 90, 0.45)";
+    ctx.fillRect(x - bodyWidth / 2, volumeBottom - barHeight, bodyWidth, Math.max(barHeight, 1));
+  });
+  ctx.fillStyle = "#647284";
+  ctx.font = "12px Microsoft YaHei, sans-serif";
+  ctx.fillText("成交量", 48, volumeTop - 5);
+
+  const macd = macdSeries(candles);
+  const macdValues = [...macd.dif, ...macd.dea, ...macd.hist].map((value) => Math.abs(value));
+  const macdMax = Math.max(...macdValues, 0.01);
+  const macdZero = macdTop + (macdBottom - macdTop) / 2;
+  const macdY = (value) => macdZero - (value / macdMax) * ((macdBottom - macdTop) / 2);
+  ctx.strokeStyle = "#e2e8f0";
+  ctx.beginPath();
+  ctx.moveTo(44, macdZero);
+  ctx.lineTo(width - 20, macdZero);
+  ctx.stroke();
+  macd.hist.forEach((value, index) => {
+    const x = 48 + index * step;
+    const py = macdY(value);
+    ctx.fillStyle = value >= 0 ? "rgba(194, 65, 59, 0.55)" : "rgba(22, 134, 90, 0.55)";
+    ctx.fillRect(x - bodyWidth / 2, Math.min(py, macdZero), bodyWidth, Math.max(Math.abs(py - macdZero), 1));
+  });
+  function drawMacdLine(values, color, label, labelX) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    values.forEach((value, index) => {
+      const x = 48 + index * step;
+      const py = macdY(value);
+      if (index === 0) ctx.moveTo(x, py);
+      else ctx.lineTo(x, py);
+    });
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.fillText(label, labelX, macdTop - 5);
+  }
+  drawMacdLine(macd.dif, "#2369b8", "DIF", 104);
+  drawMacdLine(macd.dea, "#b7791f", "DEA", 144);
+  ctx.fillStyle = "#647284";
+  ctx.fillText("MACD", 48, macdTop - 5);
+
+  const annotationMap = replayAnnotationMap();
+  candles.forEach((item, index) => {
+    const annotations = annotationMap.get(item.date);
+    if (!annotations?.length) return;
+    const x = 48 + index * step;
+    const markerY = y(item.high) - 12;
+    const latest = annotations.at(-1);
+    const fill = latest.action === "buy" ? "#2369b8" : latest.action === "sell" ? "#c2413b" : "#647284";
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.arc(x, Math.max(priceTop + 10, markerY), 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "9px Microsoft YaHei, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(latest.action === "buy" ? "B" : latest.action === "sell" ? "S" : "N", x, Math.max(priceTop + 13, markerY + 3));
+    ctx.textAlign = "left";
+  });
+
+  if (replayState.hoverIndex !== null && candles[replayState.hoverIndex]) {
+    const item = candles[replayState.hoverIndex];
+    const x = 48 + replayState.hoverIndex * step;
+    const hoverY = Math.max(priceTop, Math.min(priceBottom, replayState.hoverY ?? y(item.close)));
+    const hoverPrice = max - ((hoverY - priceTop) / (chartHeight || 1)) * (max - min);
+    ctx.strokeStyle = "#2369b8";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(x, priceTop);
+    ctx.lineTo(x, macdBottom);
+    ctx.moveTo(44, hoverY);
+    ctx.lineTo(width - 20, hoverY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#2369b8";
+    ctx.fillRect(width - 72, hoverY - 10, 52, 20);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "12px Microsoft YaHei, sans-serif";
+    ctx.fillText(formatPrice(hoverPrice), width - 66, hoverY + 4);
+
+    const hoverAnnotations = annotationMap.get(item.date) || [];
+    const selectedAnnotations = replayState.selectedNoteDate === item.date ? annotationMap.get(replayState.selectedNoteDate) || [] : [];
+    const activeAnnotations = hoverAnnotations.length ? hoverAnnotations : selectedAnnotations;
+    const lines = [
+      `${item.date}  开:${formatPrice(item.open)} 收:${formatPrice(item.close)} 高:${formatPrice(item.high)} 低:${formatPrice(item.low)}`,
+      `光标价 ${formatPrice(hoverPrice)}`,
+      ...activeAnnotations.slice(-3).map((note) => `${replayActionLabel(note.action)}：${note.annotationText}`),
+    ];
+    ctx.font = "12px Microsoft YaHei, sans-serif";
+    const textWidth = Math.max(...lines.map((line) => ctx.measureText(line).width));
+    const boxX = 52;
+    const boxY = priceTop + 8;
+    const boxHeight = 12 + lines.length * 18;
+    ctx.fillStyle = "rgba(23, 32, 42, 0.88)";
+    ctx.fillRect(boxX, boxY, Math.min(textWidth + 18, width - 96), boxHeight);
+    ctx.fillStyle = "#ffffff";
+    lines.forEach((line, index) => {
+      ctx.fillText(line, boxX + 9, boxY + 19 + index * 18);
+    });
+  }
+
+  const last = candles.at(-1);
+  ctx.fillStyle = "#17202a";
+  ctx.font = "12px Microsoft YaHei, sans-serif";
+  ctx.fillText(`${last.date}  O:${formatPrice(last.open)} H:${formatPrice(last.high)} L:${formatPrice(last.low)} C:${formatPrice(last.close)}`, 48, height - 20);
+}
+
+function updateReplayHover(event) {
+  if (!replayState.data) return;
+  const canvas = document.querySelector("#replayChart");
+  const candles = replayVisibleCandles();
+  if (!canvas || !candles.length) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const canvasX = x * scaleX;
+  const step = Math.max((canvas.width - 64) / candles.length, 4);
+  const index = Math.round((canvasX - 48) / step);
+  replayState.hoverIndex = Math.max(0, Math.min(candles.length - 1, index));
+  replayState.hoverY = y * scaleY;
+  drawReplayChart();
+}
+
+function selectReplayAnnotation(event) {
+  if (!replayState.data) return;
+  const canvas = document.querySelector("#replayChart");
+  const candles = replayVisibleCandles();
+  if (!canvas || !candles.length) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const scaleX = canvas.width / rect.width;
+  const canvasX = x * scaleX;
+  const step = Math.max((canvas.width - 64) / candles.length, 4);
+  const index = Math.round((canvasX - 48) / step);
+  const candle = candles[Math.max(0, Math.min(candles.length - 1, index))];
+  const annotations = replayAnnotationMap().get(candle.date) || [];
+  replayState.selectedNoteDate = annotations.length ? candle.date : null;
+  drawReplayChart();
+}
+
+function clearReplayHover() {
+  replayState.hoverIndex = null;
+  replayState.hoverY = null;
+  drawReplayChart();
+}
+
+function zoomReplayChart(direction) {
+  if (!replayState.data) return;
+  const next = replayState.visibleCount + direction * 20;
+  replayState.visibleCount = Math.max(30, Math.min(240, next));
+  replayState.hoverIndex = null;
+  replayState.hoverY = null;
+  replayState.selectedNoteDate = null;
+  drawReplayChart();
+  setStatus("#replayStatus", `当前显示最近 ${replayState.visibleCount} 根K线。`, "neutral");
+}
+
+function updateReplayUi() {
+  const candle = currentReplayCandle();
+  const entryPrice = Number(replayState.position?.entryPrice) || null;
+  const hasPosition = Boolean(entryPrice && replayState.position);
+  const currentReturn = hasPosition && candle ? ((candle.close - entryPrice) / entryPrice) * 100 : null;
+  document.querySelector("#replayTitle").textContent = replayState.data ? `${replayState.data.symbol} 回放训练` : "等待开始";
+  document.querySelector("#replayCurrentDate").textContent = candle?.date || "--";
+  document.querySelector("#replayClose").textContent = candle ? formatPrice(candle.close) : "--";
+  document.querySelector("#replayEntryPrice").textContent = hasPosition ? formatPrice(entryPrice) : "空仓";
+  const returnNode = document.querySelector("#replayReturn");
+  returnNode.textContent = currentReturn === null ? "--" : `${currentReturn.toFixed(2)}%`;
+  returnNode.className = currentReturn === null ? "" : currentReturn >= 0 ? "positive-text" : "negative-text";
+  document.querySelector("#replayBuy").disabled = !replayState.data || Boolean(replayState.position);
+  document.querySelector("#replaySell").disabled = !replayState.data || !replayState.position;
+  document.querySelector("#replayHold").disabled = !replayState.data;
+  document.querySelector("#replayLog").innerHTML = replayState.log.slice(-8).reverse().map((item) => `
+    <article class="level-row ${item.action === "sell" ? "resistance" : "support"}">
+      <div><strong>${item.date} · ${item.label}</strong><p>${item.action === "hold" ? item.note || "无备注" : item.note || item.reason || "无备注"} · 收盘价 ${formatPrice(item.price)}</p></div>
+      <span>${replayActionLabel(item.action)}</span>
+    </article>
+  `).join("");
+  drawReplayChart();
+}
+
+function replayPayload(action, reason, note) {
+  const candle = currentReplayCandle();
+  return {
+    symbol: replayState.data.symbol,
+    action,
+    date: candle.date,
+    price: candle.close,
+    timeframe: replayState.frame,
+    structure: document.querySelector("#replayStructure").value.trim(),
+    support: Number(document.querySelector("#replaySupport").value) || null,
+    resistance: Number(document.querySelector("#replayResistance").value) || null,
+    supportEvidence: document.querySelector("#replaySupportEvidence").value,
+    resistanceEvidence: document.querySelector("#replayResistanceEvidence").value,
+    supportReason: document.querySelector("#replaySupportReason").value.trim(),
+    resistanceReason: document.querySelector("#replayResistanceReason").value.trim(),
+    reason,
+    note,
+    positionBefore: replayState.position,
+  };
+}
+
+async function saveReplayDecision(action) {
+  if (!replayState.data) return;
+  const candle = currentReplayCandle();
+  if (!candle) return;
+  const buyReason = document.querySelector("#replayBuyReason").value.trim();
+  const sellReason = document.querySelector("#replaySellReason").value.trim();
+  const holdNote = document.querySelector("#replayHoldNote").value.trim();
+  if (action === "buy" && !buyReason) {
+    setStatus("#replayStatus", "买入前需要填写买入理由。", "negative");
+    return;
+  }
+  if (action === "sell" && !sellReason) {
+    setStatus("#replayStatus", "卖出前需要填写卖出理由。", "negative");
+    return;
+  }
+  const reason = action === "buy" ? buyReason : action === "sell" ? sellReason : "观望";
+  const note = action === "hold" ? holdNote : reason;
+  const payload = replayPayload(action, reason, note);
+  const response = await fetch(apiUrl("/api/trade-replay-decision"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    setStatus("#replayStatus", result.error || "保存决策失败。", "negative");
+    return;
+  }
+  if (action === "buy") {
+    replayState.position = { entryDate: candle.date, entryPrice: candle.close, reason: buyReason };
+  } else if (action === "sell") {
+    replayState.position = null;
+  }
+  replayState.log.push({ action, label: replayActionLabel(action), date: candle.date, price: candle.close, reason, note });
+  replayState.selectedNoteDate = note ? candle.date : null;
+  if (action === "buy") document.querySelector("#replayBuyReason").value = "";
+  if (action === "sell") document.querySelector("#replaySellReason").value = "";
+  if (action === "hold") document.querySelector("#replayHoldNote").value = "";
+  replayState.cursor += 1;
+  const daily = replayState.data.timeframes.daily;
+  if (replayState.cursor >= daily.length) {
+    replayState.cursor = daily.length - 1;
+    setStatus("#replayStatus", "已经到达最后一根K线。", "neutral");
+  } else {
+    setStatus("#replayStatus", `已保存${action === "buy" ? "买入" : action === "sell" ? "卖出" : "观望"}，进入下一根K线。`, "positive");
+  }
+  updateReplayUi();
+}
+
+async function startTradeReplay() {
+  const button = document.querySelector("#startReplay");
+  const previousText = button.textContent;
+  try {
+    button.disabled = true;
+    button.textContent = "正在加载...";
+    setStatus("#replayStatus", "正在拉取700个交易日前后的历史数据...", "neutral");
+    const response = await fetch(apiUrl("/api/trade-replay"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol: document.querySelector("#replaySymbol").value.trim(),
+        date: document.querySelector("#replayDate").value,
+        lookback: 700,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "回放数据加载失败。");
+    replayState = { data, frame: "daily", cursor: data.cursor, position: null, log: [], visibleCount: 120, hoverIndex: null, hoverY: null, selectedNoteDate: null };
+    document.querySelectorAll(".timeframe-button").forEach((item) => item.classList.toggle("active", item.dataset.frame === "daily"));
+    setStatus("#replayStatus", "训练已开始。", "positive");
+    updateReplayUi();
+  } catch (error) {
+    setStatus("#replayStatus", error.message, "negative");
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
 function render() {
+  if (activeStrategy === "buy" && lastBuyAnalysis) {
+    renderBuyAnalysis(lastBuyAnalysis);
+    return;
+  }
   const data = getInputs();
   const analysis = activeStrategy === "buy" ? evaluateBuy(data) : evaluateSell(data);
   const [level, text, type] = decisionFor(activeStrategy, analysis.score);
@@ -474,11 +1080,18 @@ function render() {
   output.entryRange.textContent = analysis.entryRange;
   output.stopLoss.textContent = analysis.stopLoss;
   output.targetPrice.textContent = analysis.targetPrice;
-  output.trendLabel.textContent = trendText;
   output.marketState.textContent = `${activeStrategy === "buy" ? "买入" : "卖出"}评分 ${analysis.score}`;
   updateDecisionStyle(type);
   renderSignals(analysis.signals);
   drawChart(data);
+}
+
+function syncStrategyControls() {
+  const isBuy = activeStrategy === "buy";
+  document.querySelector("#buyRealPanel")?.classList.toggle("hidden", !isBuy);
+  document.querySelector("#legacyFields")?.classList.toggle("hidden", isBuy);
+  document.querySelector(".risk-row")?.classList.toggle("hidden", isBuy);
+  document.querySelector("#loadSample")?.classList.toggle("hidden", isBuy);
 }
 
 function setView(view) {
@@ -488,13 +1101,18 @@ function setView(view) {
     button.classList.toggle("active", isActive);
     button.setAttribute("aria-selected", String(isActive));
   });
-  document.querySelector("#strategyView").classList.toggle("hidden", view === "training");
+  document.querySelector("#strategyView").classList.toggle("hidden", view === "training" || view === "replay");
   document.querySelector("#trainingView").classList.toggle("hidden", view !== "training");
+  document.querySelector("#replayView").classList.toggle("hidden", view !== "replay");
   if (view === "buy" || view === "sell") {
     activeStrategy = view;
+    syncStrategyControls();
     render();
-  } else {
+  } else if (view === "training") {
     output.marketState.textContent = "支撑压力训练";
+  } else if (view === "replay") {
+    output.marketState.textContent = "交易思维训练";
+    updateReplayUi();
   }
 }
 
@@ -546,6 +1164,54 @@ function getTrainingOptions() {
     reactionPct: Number(document.querySelector("#reactionPct").value) / 100,
     corrections: buildCorrectionsFromInputs(),
   };
+}
+
+function setTrainingStatus(message, type = "neutral") {
+  const status = document.querySelector("#trainingStatus");
+  if (!status) return;
+  status.textContent = message;
+  status.classList.remove("positive", "negative", "neutral");
+  if (message) status.classList.add(type);
+}
+
+function setStatus(selector, message, type = "neutral") {
+  const status = document.querySelector(selector);
+  if (!status) return;
+  status.textContent = message;
+  status.classList.remove("positive", "negative", "neutral");
+  if (message) status.classList.add(type);
+}
+
+function formatDateInputValue(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function previousTradingDateString(referenceDate = new Date()) {
+  const date = new Date(referenceDate);
+  date.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() - 1);
+  while (date.getDay() === 0 || date.getDay() === 6) {
+    date.setDate(date.getDate() - 1);
+  }
+  return formatDateInputValue(date);
+}
+
+function setDefaultTrainingDate() {
+  const input = document.querySelector("#trainDate");
+  if (input && !input.value) input.value = previousTradingDateString();
+}
+
+function setDefaultBuyDate() {
+  const input = document.querySelector("#buyDate");
+  if (input && !input.value) input.value = previousTradingDateString();
+}
+
+function setDefaultReplayDate() {
+  const input = document.querySelector("#replayDate");
+  if (input && !input.value) input.value = previousTradingDateString();
 }
 
 function tolerance(price, pct) {
@@ -736,10 +1402,10 @@ function runTraining() {
 
 async function fetchRealTraining() {
   const button = document.querySelector("#fetchRealTraining");
-  await requestTraining(getTrainingOptions(), button, "正在拉取真实数据...");
+  await requestTraining(getTrainingOptions(), button, "正在拉取真实数据...", "已按股票代码计算支撑压力");
 }
 
-async function requestTraining(options, button, loadingText) {
+async function requestTraining(options, button, loadingText, successText = "训练完成") {
   const previousText = button.textContent;
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 60000);
@@ -747,6 +1413,7 @@ async function requestTraining(options, button, loadingText) {
     if (!options.symbol || !options.date) throw new Error("请填写股票代码和分析日期。");
     button.disabled = true;
     button.textContent = loadingText;
+    setTrainingStatus(loadingText, "neutral");
     document.querySelector("#trainingTitle").textContent = "正在拉取 AKShare 周线和日线数据";
     const response = await fetch(apiUrl("/api/train-support-resistance"), {
       method: "POST",
@@ -758,10 +1425,12 @@ async function requestTraining(options, button, loadingText) {
     if (!response.ok) throw new Error(data.error || "真实数据训练失败。");
     lastTrainingResult = data;
     renderServerTrainingResult(data);
+    setTrainingStatus(successText, "positive");
   } catch (error) {
     const message = error.name === "AbortError" ? "真实数据请求超过60秒，请稍后重试，或先用CSV拟合。" : error.message;
     document.querySelector("#trainingTitle").textContent = "训练失败";
     document.querySelector("#levelTable").innerHTML = `<div class="decision negative"><span class="decision-level">真实数据接口有问题</span><p>${message}</p></div>`;
+    setTrainingStatus(message, "negative");
   } finally {
     window.clearTimeout(timeoutId);
     button.disabled = false;
@@ -775,20 +1444,22 @@ async function randomTraining() {
   try {
     button.disabled = true;
     button.textContent = "正在抽取样本...";
+    setTrainingStatus("正在抽取随机股票和时间", "neutral");
     document.querySelector("#trainingTitle").textContent = "正在抽取随机股票和时间";
     const response = await fetch(apiUrl("/api/random-training-sample"));
     const sample = await response.json();
     if (!response.ok) throw new Error(sample.error || "随机样本获取失败。");
     document.querySelector("#trainSymbol").value = sample.symbol;
-    document.querySelector("#trainDate").value = sample.date;
+    document.querySelector("#trainDate").value = sample.date || previousTradingDateString();
     document.querySelector("#manualSupport").value = "";
     document.querySelector("#manualResistance").value = "";
     document.querySelector("#trainingTitle").textContent = `${sample.symbol}：${sample.date}，正在计算支撑压力`;
-    await requestTraining(getTrainingOptions(), button, "正在训练样本...");
+    await requestTraining(getTrainingOptions(), button, "正在训练样本...", "随机训练完成");
   } catch (error) {
     const message = error.message === "Failed to fetch" ? "无法连接本地服务，请确认页面地址是 http://127.0.0.1:8765/ 且服务正在运行。" : error.message;
     document.querySelector("#trainingTitle").textContent = "训练失败";
     document.querySelector("#levelTable").innerHTML = `<div class="decision negative"><span class="decision-level">随机训练有问题</span><p>${message}</p></div>`;
+    setTrainingStatus(message, "negative");
   } finally {
     button.disabled = false;
     button.textContent = previousText;
@@ -797,7 +1468,7 @@ async function randomTraining() {
 
 async function refitTraining() {
   const button = document.querySelector("#refitTraining");
-  await requestTraining(getTrainingOptions(), button, "正在按修正重新拟合...");
+  await requestTraining(getTrainingOptions(), button, "正在按修正重新拟合...", "已按人工修正重新拟合");
 }
 
 function renderTrainingResult(result) {
@@ -862,10 +1533,47 @@ document.querySelectorAll(".tab-button").forEach((button) => {
 });
 
 document.querySelector("#loadSample")?.addEventListener("click", () => loadSample());
+document.querySelector("#fetchBuyAnalysis")?.addEventListener("click", () => requestBuyAnalysis());
+document.querySelector("#recalcBuyRisk")?.addEventListener("click", recalcBuyRisk);
+document.querySelector("#startReplay")?.addEventListener("click", startTradeReplay);
+document.querySelector("#replayBuy")?.addEventListener("click", () => saveReplayDecision("buy"));
+document.querySelector("#replaySell")?.addEventListener("click", () => saveReplayDecision("sell"));
+document.querySelector("#replayHold")?.addEventListener("click", () => saveReplayDecision("hold"));
+document.querySelectorAll(".timeframe-button").forEach((button) => {
+  button.addEventListener("click", () => {
+    replayState.frame = button.dataset.frame;
+    replayState.hoverIndex = null;
+    replayState.hoverY = null;
+    replayState.selectedNoteDate = null;
+    document.querySelectorAll(".timeframe-button").forEach((item) => item.classList.toggle("active", item === button));
+    updateReplayUi();
+  });
+});
+["#replaySupport", "#replayResistance"].forEach((selector) => {
+  document.querySelector(selector)?.addEventListener("input", drawReplayChart);
+});
+document.querySelector("#replayChart")?.addEventListener("mousemove", updateReplayHover);
+document.querySelector("#replayChart")?.addEventListener("click", selectReplayAnnotation);
+document.querySelector("#replayChart")?.addEventListener("mouseleave", clearReplayHover);
+document.addEventListener("keydown", (event) => {
+  if (activeView !== "replay") return;
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    zoomReplayChart(-1);
+  } else if (event.key === "ArrowDown") {
+    event.preventDefault();
+    zoomReplayChart(1);
+  }
+});
 document.querySelector("#runTraining")?.addEventListener("click", runTraining);
 document.querySelector("#fetchRealTraining")?.addEventListener("click", fetchRealTraining);
 document.querySelector("#randomTraining")?.addEventListener("click", randomTraining);
 document.querySelector("#refitTraining")?.addEventListener("click", refitTraining);
 document.querySelector("#weeklyCsvInput").value = sampleWeeklyCsv;
 
-render();
+setDefaultTrainingDate();
+setDefaultBuyDate();
+setDefaultReplayDate();
+syncStrategyControls();
+setView("replay");
+updateReplayUi();
