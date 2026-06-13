@@ -232,7 +232,8 @@ def cached_paths(symbol, period):
     return sorted(CACHE_DIR.glob(f"{symbol}_{period}_*.csv"), key=lambda path: path.stat().st_mtime, reverse=True)
 
 
-def load_nearest_cache(symbol, period, start_ts, analysis_ts):
+def load_nearest_cache(symbol, period, start_ts, analysis_ts, anchor_ts=None):
+    fallback = None
     for path in cached_paths(symbol, period):
         try:
             df = load_csv(path)
@@ -240,29 +241,49 @@ def load_nearest_cache(symbol, period, start_ts, analysis_ts):
             continue
         filtered = df[(df["date"] >= start_ts) & (df["date"] <= analysis_ts)].copy()
         if not filtered.empty:
-            return filtered.reset_index(drop=True)
-    return None
+            filtered = filtered.reset_index(drop=True)
+            if anchor_ts is None:
+                return filtered
+            if filtered["date"].min() <= anchor_ts <= filtered["date"].max():
+                return filtered
+            if fallback is None:
+                fallback = filtered
+    return fallback
 
 
-def fetch_cached(fetcher, symbol, start_ts, analysis_ts, period, label):
+def covers_anchor(df, anchor_ts):
+    if anchor_ts is None or df.empty:
+        return True
+    return df["date"].min() <= anchor_ts <= df["date"].max()
+
+
+def fetch_cached(fetcher, symbol, start_ts, analysis_ts, period, label, anchor_ts=None):
     path = cache_path(symbol, start_ts, analysis_ts, period)
+    fetch_error = None
     try:
         df = fetch_with_retry(fetcher, symbol, start_ts, analysis_ts, label)
-        df.to_csv(path, index=False, encoding="utf-8-sig")
-        return df
-    except Exception as exc:
-        try:
-            df = fetch_direct_fallback(symbol, start_ts, analysis_ts, period)
+        if covers_anchor(df, anchor_ts):
             df.to_csv(path, index=False, encoding="utf-8-sig")
             return df
-        except Exception:
-            pass
-        if path.exists():
-            return load_csv(path)
-        cached = load_nearest_cache(symbol, period, start_ts, analysis_ts)
-        if cached is not None:
-            return cached
-        raise exc
+    except Exception as exc:
+        fetch_error = exc
+    try:
+        df = fetch_direct_fallback(symbol, start_ts, analysis_ts, period)
+        if covers_anchor(df, anchor_ts):
+            df.to_csv(path, index=False, encoding="utf-8-sig")
+            return df
+    except Exception as exc:
+        fetch_error = fetch_error or exc
+    if path.exists():
+        df = load_csv(path)
+        if covers_anchor(df, anchor_ts):
+            return df
+    cached = load_nearest_cache(symbol, period, start_ts, analysis_ts, anchor_ts=anchor_ts)
+    if cached is not None:
+        return cached
+    if fetch_error is not None:
+        raise fetch_error
+    raise ValueError(f"{label}数据不覆盖目标日期。")
 
 
 def fetch_market_data(symbol, analysis_ts, years=3):
@@ -280,7 +301,7 @@ def trade_replay_payload(symbol, start_date, lookback=700):
     start_ts = parse_date(start_date)
     fetch_start = start_ts - pd.DateOffset(years=4)
     fetch_end = max(previous_trading_day(), start_ts + pd.DateOffset(years=2))
-    daily = fetch_cached(fetch_akshare_daily, symbol, fetch_start, fetch_end, "daily", "日线")
+    daily = fetch_cached(fetch_akshare_daily, symbol, fetch_start, fetch_end, "daily", "日线", anchor_ts=start_ts)
     daily = daily[daily["date"] <= fetch_end].copy().reset_index(drop=True)
     if daily.empty:
         raise ValueError(f"No daily data for {symbol}.")
@@ -310,6 +331,82 @@ def save_trade_replay_decision(payload):
     with TRADE_REPLAY_DATASET.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     return {"saved": True, "path": str(TRADE_REPLAY_DATASET)}
+
+
+def read_trade_replay_records():
+    records = []
+    if not TRADE_REPLAY_DATASET.exists():
+        return records
+    with TRADE_REPLAY_DATASET.open("r", encoding="utf-8") as handle:
+        for index, line in enumerate(handle):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            record["id"] = index
+            records.append(record)
+    return records
+
+
+def trade_replay_records():
+    records = read_trade_replay_records()
+    records.reverse()
+    return {"records": records, "count": len(records)}
+
+
+def trade_replay_datasets():
+    records = read_trade_replay_records()
+    groups = {}
+    for record in records:
+        session_id = record.get("sessionId") or f"legacy:{record.get('symbol', '')}:{record.get('trainingStartDate') or record.get('date', '')}"
+        if session_id not in groups:
+            groups[session_id] = {
+                "id": session_id,
+                "symbol": record.get("symbol"),
+                "startDate": record.get("trainingStartDate") or record.get("date"),
+                "endDate": record.get("date"),
+                "savedAt": record.get("savedAt"),
+                "actions": [],
+                "recordIds": [],
+            }
+        group = groups[session_id]
+        group["actions"].append(record)
+        group["recordIds"].append(record["id"])
+        group["endDate"] = record.get("date") or group["endDate"]
+        group["savedAt"] = record.get("savedAt") or group["savedAt"]
+    datasets = list(groups.values())
+    datasets.sort(key=lambda item: item.get("savedAt") or "", reverse=True)
+    return {"datasets": datasets, "count": len(datasets), "recordCount": len(records)}
+
+
+def delete_trade_replay_record(record_id=None, session_id=None):
+    if not TRADE_REPLAY_DATASET.exists():
+        return {"deleted": False, "count": 0}
+    if record_id is None and session_id is None:
+        return {"deleted": False, "count": 0}
+    target = int(record_id) if record_id is not None else None
+    kept = []
+    deleted = False
+    with TRADE_REPLAY_DATASET.open("r", encoding="utf-8") as handle:
+        for index, line in enumerate(handle):
+            remove = index == target
+            if session_id is not None:
+                try:
+                    record = json.loads(line)
+                    record_session = record.get("sessionId") or f"legacy:{record.get('symbol', '')}:{record.get('trainingStartDate') or record.get('date', '')}"
+                    remove = record_session == session_id
+                except json.JSONDecodeError:
+                    remove = False
+            if remove:
+                deleted = True
+                continue
+            kept.append(line)
+    with TRADE_REPLAY_DATASET.open("w", encoding="utf-8") as handle:
+        handle.writelines(kept)
+    return {"deleted": deleted, "count": len(kept)}
 
 
 def latest_window(df, analysis_ts):
@@ -743,10 +840,45 @@ def cached_symbols():
         return []
     symbols = {
         path.name.split("_", 1)[0]
-        for path in CACHE_DIR.glob("*_weekly_*.csv")
+        for path in list(CACHE_DIR.glob("*_daily_*.csv")) + list(CACHE_DIR.glob("*_weekly_*.csv"))
         if "_" in path.name
     }
     return sorted(symbol for symbol in symbols if symbol in RANDOM_SYMBOLS)
+
+
+def cached_symbol_start_date(symbol):
+    starts = []
+    for path in CACHE_DIR.glob(f"{symbol}_daily_*.csv"):
+        try:
+            df = pd.read_csv(path, usecols=["date"])
+            if not df.empty:
+                starts.append(pd.to_datetime(df["date"]).min())
+        except Exception:
+            continue
+    return min(starts) if starts else None
+
+
+def cached_symbol_trade_dates(symbol, start_bound, end_bound):
+    dates = []
+    for path in CACHE_DIR.glob(f"{symbol}_daily_*.csv"):
+        try:
+            df = pd.read_csv(path, usecols=["date"])
+            series = pd.to_datetime(df["date"], errors="coerce").dropna()
+            series = series[(series >= start_bound) & (series <= end_bound)]
+            dates.extend(series.tolist())
+        except Exception:
+            continue
+    return sorted(set(dates))
+
+
+def valid_random_replay_symbols(start_bound, end_bound):
+    symbols = cached_symbols() or RANDOM_SYMBOLS
+    valid = []
+    for symbol in symbols:
+        dates = cached_symbol_trade_dates(symbol, start_bound, end_bound)
+        if dates:
+            valid.append((symbol, dates))
+    return valid
 
 
 class TradingAdviceHandler(SimpleHTTPRequestHandler):
@@ -765,6 +897,12 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/random-training-sample":
             self.write_json(200, self.random_training_sample())
             return
+        if parsed.path == "/api/trade-replay-records":
+            self.write_json(200, trade_replay_records())
+            return
+        if parsed.path == "/api/trade-replay-datasets":
+            self.write_json(200, trade_replay_datasets())
+            return
         super().do_GET()
 
     def do_POST(self):
@@ -780,6 +918,9 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/trade-replay-decision":
             self.handle_trade_replay_decision()
+            return
+        if parsed.path == "/api/delete-trade-replay-record":
+            self.handle_delete_trade_replay_record()
             return
         self.send_error(404, "Not found")
 
@@ -855,11 +996,24 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
         except Exception as exc:
             self.write_json(400, {"error": str(exc)})
 
+    def handle_delete_trade_replay_record(self):
+        try:
+            payload = self.read_json_payload()
+            self.write_json(200, delete_trade_replay_record(payload.get("id"), payload.get("sessionId")))
+        except Exception as exc:
+            self.write_json(400, {"error": str(exc)})
+
     def random_training_sample(self):
-        symbols = cached_symbols() or RANDOM_SYMBOLS
+        start_bound = pd.Timestamp("2014-01-01")
+        end = pd.Timestamp("2026-06-01")
+        candidates = valid_random_replay_symbols(start_bound, end)
+        if not candidates:
+            raise ValueError("没有可用于随机盲训的缓存行情，请先输入股票代码拉取一次数据。")
+        symbol, dates = random.choice(candidates)
+        random_day = random.choice(dates)
         return {
-            "symbol": random.choice(symbols),
-            "date": previous_trading_day().strftime("%Y-%m-%d"),
+            "symbol": symbol,
+            "date": pd.Timestamp(random_day).strftime("%Y-%m-%d"),
         }
 
     def write_json(self, status, data):

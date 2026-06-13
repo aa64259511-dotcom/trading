@@ -19,6 +19,10 @@
             <span id="marketState">等待输入</span>
           </div>
         </header>
+        <nav class="mode-tabs" aria-label="模块切换">
+          <button class="tab-button active" type="button" data-view="replay">交易训练</button>
+          <button class="tab-button" type="button" data-view="dataset">训练集管理</button>
+        </nav>
 
         <section class="content-grid strategy-view" id="strategyView">
           <form class="analysis-form" id="analysisForm">
@@ -182,9 +186,11 @@
               </div>
 
               <div class="replay-fetch-row">
-                <label>股票代码 <input id="replaySymbol" type="text" value="002460" autocomplete="off" /></label>
-                <label>开始日期 <input id="replayDate" type="date" /></label>
+                <label>股票代码 <input id="replaySymbol" type="text" value="002460" autocomplete="off" /><strong class="blind-value hidden" id="blindSymbol">已隐藏</strong></label>
+                <label>开始日期 <input id="replayDate" type="date" /><strong class="blind-value hidden" id="blindDate">已隐藏</strong></label>
                 <button class="primary-button" id="startReplay" type="button">开始训练</button>
+                <button class="secondary-button" id="startBlindReplay" type="button">随机盲训</button>
+                <button class="secondary-button hidden" id="revealReplayIdentity" type="button">显示股票和日期</button>
               </div>
 
               <div class="metrics-strip">
@@ -192,9 +198,20 @@
                 <div><span>收盘价</span><strong id="replayClose">--</strong></div>
                 <div><span>买入价</span><strong id="replayEntryPrice">--</strong></div>
                 <div><span>当前收益率</span><strong id="replayReturn">--</strong></div>
+                <div><span>累计收益率</span><strong id="replayTotalReturn">0.00%</strong></div>
               </div>
 
               <div class="kline-card">
+                <div class="chart-tools" aria-label="支撑压力画线工具">
+                  <button class="secondary-button level-tool" id="drawLevelLine" type="button">画支撑压力线</button>
+                  <button class="secondary-button" id="clearLevelLines" type="button">清空线</button>
+                  <span id="activeLevelInfo">正常浏览：可拖动画布、上下键缩放</span>
+                </div>
+                <div class="selected-level-tools hidden" id="selectedLevelTools">
+                  <label>画线原因 <input id="selectedLevelReason" type="text" placeholder="说明这条线的依据" /></label>
+                  <button class="secondary-button" id="saveSelectedLevelReason" type="button">写入画线原因</button>
+                  <button class="secondary-button danger-button" id="deleteSelectedLevel" type="button">删除选中线</button>
+                </div>
                 <canvas id="replayChart" width="1280" height="560"></canvas>
               </div>
 
@@ -202,10 +219,19 @@
                 <label>趋势结构判断 <input id="replayStructure" type="text" placeholder="如：上升趋势中的大调整" /></label>
               </div>
 
+              <div class="replay-write-row">
+                <button class="secondary-button write-toggle" id="replayWriteToggle" type="button" aria-pressed="false">测试模式：不写入训练数据</button>
+                <span>开启后，本次买入、卖出、观望才会保存到训练集。</span>
+              </div>
+
               <div class="decision-actions">
                 <div class="decision-entry">
                   <button class="primary-button" id="replayBuy" type="button">买入</button>
-                  <label>买入理由 <textarea id="replayBuyReason" placeholder="点击买入前填写"></textarea></label>
+                  <div class="buy-entry-fields">
+                    <label>买入理由 <textarea id="replayBuyReason" placeholder="点击买入前填写"></textarea></label>
+                    <label>止损价格 <input id="replayStopLoss" type="number" min="0" step="0.01" /></label>
+                    <label>止损原因 <textarea id="replayStopLossReason" placeholder="说明为什么把止损设在这里"></textarea></label>
+                  </div>
                 </div>
                 <div class="decision-entry">
                   <button class="secondary-button" id="replaySell" type="button" disabled>卖出</button>
@@ -217,44 +243,31 @@
                 </div>
               </div>
 
-              <div class="level-reason-grid">
-                <div class="level-reason-row support-row">
-                  <label>支撑位 <input id="replaySupport" type="number" min="0" step="0.01" /></label>
-                  <label>
-                    支撑类型
-                    <select id="replaySupportEvidence">
-                      <option value="">未选择</option>
-                      <option value="previous_low">前低</option>
-                      <option value="multi_touch">多次触碰</option>
-                      <option value="body_cluster">K线实体密集区</option>
-                      <option value="breakdown_reclaim">跌破后拉回</option>
-                      <option value="platform_lower">平台下沿</option>
-                      <option value="volume_area">成交密集区</option>
-                    </select>
-                  </label>
-                  <label>支撑原因 <textarea id="replaySupportReason" placeholder="说明为什么把这里标为支撑"></textarea></label>
-                </div>
-                <div class="level-reason-row resistance-row">
-                  <label>压力位 <input id="replayResistance" type="number" min="0" step="0.01" /></label>
-                  <label>
-                    压力类型
-                    <select id="replayResistanceEvidence">
-                      <option value="">未选择</option>
-                      <option value="previous_high">前高</option>
-                      <option value="multi_touch">多次触碰</option>
-                      <option value="body_cluster">K线实体密集区</option>
-                      <option value="failed_breakout">突破失败</option>
-                      <option value="platform_upper">平台上沿</option>
-                      <option value="volume_area">成交密集区</option>
-                    </select>
-                  </label>
-                  <label>压力原因 <textarea id="replayResistanceReason" placeholder="说明为什么把这里标为压力"></textarea></label>
-                </div>
+              <div class="level-reason-grid hidden" aria-hidden="true">
+                <input id="replaySupport" type="number" min="0" step="0.01" readonly />
+                <textarea id="replaySupportReason"></textarea>
+                <input id="replayResistance" type="number" min="0" step="0.01" readonly />
+                <textarea id="replayResistanceReason"></textarea>
               </div>
 
               <p class="training-status" id="replayStatus" role="status" aria-live="polite"></p>
               <div class="level-table" id="replayLog"></div>
+
             </form>
+          </div>
+        </section>
+
+        <section class="dataset-view hidden" id="datasetView">
+          <div class="dataset-manager standalone" aria-label="训练集管理">
+            <div class="dataset-header">
+              <div>
+                <h2>训练集管理</h2>
+                <p>按单次训练整理记录，复现训练集并查看其中全部操作</p>
+              </div>
+              <button class="secondary-button" id="refreshTrainingRecords" type="button">刷新记录</button>
+            </div>
+            <p class="training-status" id="datasetStatus" role="status" aria-live="polite"></p>
+            <div class="dataset-list" id="trainingRecordList"></div>
           </div>
         </section>
       </section>
