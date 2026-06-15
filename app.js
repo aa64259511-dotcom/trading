@@ -36,6 +36,7 @@ let activeStrategy = "buy";
 let activeView = "replay";
 let lastTrainingResult = null;
 let lastBuyAnalysis = null;
+let stockSearchTimer = null;
 let replayState = {
   data: null,
   frame: "daily",
@@ -43,7 +44,7 @@ let replayState = {
   position: null,
   equity: 1,
   log: [],
-  visibleCount: 120,
+  visibleCount: 700,
   dragOffset: 0,
   hoverIndex: null,
   hoverY: null,
@@ -52,7 +53,7 @@ let replayState = {
   dragStartOffset: 0,
   dragMoved: false,
   selectedNoteDate: null,
-  writeTraining: false,
+  writeTraining: true,
   blindMode: false,
   blindSymbol: "",
   blindDate: "",
@@ -65,6 +66,7 @@ let replayState = {
   trainingRecords: [],
   sessionId: "",
   trainingStartDate: "",
+  aiAdviceFeedback: null,
 };
 
 function apiUrl(path) {
@@ -243,6 +245,21 @@ function clamp(value, min, max) {
 
 function formatPrice(value) {
   return value > 0 ? value.toFixed(2) : "--";
+}
+
+function formatPercent(value) {
+  if (!Number.isFinite(value)) return "--";
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${value.toFixed(2)}%`;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function riskFactor(risk) {
@@ -697,18 +714,20 @@ function replayActionLabel(action) {
 function updateReplayWriteToggle() {
   const button = document.querySelector("#replayWriteToggle");
   if (!button) return;
-  button.textContent = replayState.writeTraining ? "真实训练：写入训练数据" : "测试模式：不写入训练数据";
+  button.textContent = replayState.writeTraining ? "真实训练" : "测试训练";
   button.setAttribute("aria-pressed", replayState.writeTraining ? "true" : "false");
   button.classList.toggle("active", replayState.writeTraining);
 }
 
 function updateReplayBlindUi() {
+  const searchInput = document.querySelector("#replayStockSearch");
   const symbolInput = document.querySelector("#replaySymbol");
   const dateInput = document.querySelector("#replayDate");
   const blindSymbol = document.querySelector("#blindSymbol");
   const blindDate = document.querySelector("#blindDate");
   const revealButton = document.querySelector("#revealReplayIdentity");
   const hidden = replayState.blindMode;
+  searchInput?.classList.toggle("hidden", hidden);
   symbolInput?.classList.toggle("hidden", hidden);
   dateInput?.classList.toggle("hidden", hidden);
   blindSymbol?.classList.toggle("hidden", !hidden);
@@ -729,6 +748,84 @@ function toggleReplayWriteMode() {
   replayState.writeTraining = !replayState.writeTraining;
   updateReplayWriteToggle();
   setStatus("#replayStatus", replayState.writeTraining ? "已开启写入，本次操作会保存到训练集。" : "已切换为测试模式，本次操作不会写入训练集。", replayState.writeTraining ? "positive" : "neutral");
+}
+
+function updateReplayDecisionMode() {
+  const hasPosition = Boolean(replayState.position);
+  document.querySelector(".decision-buy-entry")?.classList.toggle("hidden", hasPosition);
+  document.querySelector(".decision-sell-entry")?.classList.toggle("hidden", !hasPosition);
+}
+
+function hideStockSearchResults() {
+  const panel = document.querySelector("#stockSearchResults");
+  if (!panel) return;
+  panel.classList.add("hidden");
+  panel.innerHTML = "";
+}
+
+function selectStockSearchResult(match) {
+  const symbolInput = document.querySelector("#replaySymbol");
+  const searchInput = document.querySelector("#replayStockSearch");
+  if (symbolInput) symbolInput.value = match.symbol;
+  if (searchInput) searchInput.value = match.name ? `${match.name} ${match.symbol}` : match.symbol;
+  hideStockSearchResults();
+  setStatus("#replayStatus", `已选择 ${match.name || "股票"} ${match.symbol}。`, "neutral");
+}
+
+function renderStockSearchResults(matches = []) {
+  const panel = document.querySelector("#stockSearchResults");
+  if (!panel) return;
+  if (!matches.length) {
+    panel.innerHTML = `<div class="stock-search-option"><span></span><strong>未找到匹配股票</strong><small>可直接输入代码</small></div>`;
+    panel.classList.remove("hidden");
+    return;
+  }
+  panel.innerHTML = matches.map((match) => `
+    <button class="stock-search-option" type="button" data-symbol="${escapeHtml(match.symbol)}" data-name="${escapeHtml(match.name || "")}" data-initials="${escapeHtml(match.initials || "")}">
+      <span>${escapeHtml(match.symbol)}</span>
+      <strong>${escapeHtml(match.name || "名称未收录")}</strong>
+      <small>${escapeHtml(match.initials || "")}</small>
+    </button>
+  `).join("");
+  panel.classList.remove("hidden");
+}
+
+async function searchReplayStock() {
+  const input = document.querySelector("#replayStockSearch");
+  if (!input) return;
+  const query = input.value.trim();
+  if (!query) {
+    hideStockSearchResults();
+    return;
+  }
+  if (/^\d{6}$/.test(query)) {
+    document.querySelector("#replaySymbol").value = query;
+    hideStockSearchResults();
+    return;
+  }
+  try {
+    const response = await fetch(apiUrl(`/api/search-stocks?q=${encodeURIComponent(query)}&limit=20`));
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "股票搜索失败。");
+    const matches = data.matches || [];
+    const exact = matches.length === 1 && (
+      matches[0].name === query ||
+      matches[0].initials === query.toUpperCase()
+    );
+    if (exact) {
+      selectStockSearchResult(matches[0]);
+      return;
+    }
+    renderStockSearchResults(matches);
+  } catch (error) {
+    renderStockSearchResults([]);
+    setStatus("#replayStatus", error.message, "negative");
+  }
+}
+
+function scheduleReplayStockSearch() {
+  window.clearTimeout(stockSearchTimer);
+  stockSearchTimer = window.setTimeout(searchReplayStock, 220);
 }
 
 function replayLogText(item) {
@@ -752,12 +849,78 @@ function createTrainingSessionId(symbol, date) {
 }
 
 function renderDatasetActions(actions = []) {
-  return actions.map((record) => `
+  return actions.map((record) => {
+    const adviceLabel = record.aiAdviceText || record.aiAdviceAction || "";
+    const feedbackText = record.aiAdviceAccepted === true
+      ? "认可"
+      : record.aiAdviceAccepted === false
+        ? `不认可${record.aiAdviceDisagreeReason ? `：${record.aiAdviceDisagreeReason}` : ""}`
+        : "";
+    const aiLine = adviceLabel || feedbackText
+      ? `<small>AI建议：${escapeHtml(adviceLabel || "--")}${record.aiAdviceScore == null ? "" : `（${Math.round(record.aiAdviceScore)}分）`}；反馈：${escapeHtml(feedbackText || "未评价")}</small>`
+      : "";
+    return `
     <div class="dataset-action-row">
       <strong>${record.date || "--"} · ${replayActionLabel(record.action)}</strong>
-      <span>${recordSummary(record)}</span>
+      <div>
+        <span>${recordSummary(record)}</span>
+        ${aiLine}
+      </div>
     </div>
-  `).join("");
+  `;
+  }).join("");
+}
+
+function datasetReturnSummary(actions = []) {
+  let position = null;
+  let equity = 1;
+  let completedTrades = 0;
+  actions.forEach((record) => {
+    if (record.action === "buy" && !position) {
+      const entryPrice = Number(record.price);
+      if (entryPrice > 0) position = { entryPrice };
+      return;
+    }
+    if (record.action === "sell" && position) {
+      const exitPrice = Number(record.price);
+      if (exitPrice > 0) {
+        equity *= exitPrice / position.entryPrice;
+        completedTrades += 1;
+      }
+      position = null;
+    }
+  });
+  return {
+    completedTrades,
+    openPosition: Boolean(position),
+    returnPct: (equity - 1) * 100,
+  };
+}
+
+function replayStateFromActions(actions = []) {
+  let position = null;
+  let equity = 1;
+  actions.forEach((record) => {
+    if (record.action === "buy" && !position) {
+      const entryPrice = Number(record.price);
+      if (entryPrice > 0) {
+        position = {
+          entryDate: record.date,
+          entryPrice,
+          reason: record.reason || record.note || "",
+          stopLoss: Number(record.stopLoss) || null,
+          stopLossReason: record.stopLossReason || "",
+        };
+      }
+      return;
+    }
+    if (record.action === "sell" && position) {
+      const exitPrice = Number(record.price);
+      if (exitPrice > 0) equity *= exitPrice / position.entryPrice;
+      position = null;
+    }
+  });
+  return { equity, position };
 }
 
 function renderTrainingRecords(datasets = []) {
@@ -767,20 +930,41 @@ function renderTrainingRecords(datasets = []) {
     list.innerHTML = `<div class="dataset-empty">暂无训练集</div>`;
     return;
   }
-  list.innerHTML = datasets.map((dataset) => `
+  list.innerHTML = datasets.map((dataset) => {
+    const actions = dataset.actions || [];
+    const returnSummary = datasetReturnSummary(actions);
+    const returnClass = returnSummary.returnPct === 0 ? "" : returnSummary.returnPct > 0 ? "positive-text" : "negative-text";
+    const actionSummary = actions.reduce((summary, item) => {
+      summary[item.action] = (summary[item.action] || 0) + 1;
+      return summary;
+    }, {});
+    return `
     <article class="dataset-row" data-id="${dataset.id}">
-      <div>
-        <strong>${dataset.symbol || "--"} · ${dataset.startDate || "--"} 至 ${dataset.endDate || "--"}</strong>
-        <p>${dataset.actions?.length || 0} 条操作：${(dataset.actions || []).map((item) => replayActionLabel(item.action)).join(" / ") || "无操作"}</p>
-        <small>${dataset.savedAt ? new Date(dataset.savedAt).toLocaleString() : "未记录保存时间"}</small>
-        <div class="dataset-action-list">${renderDatasetActions(dataset.actions || [])}</div>
+      <div class="dataset-main">
+        <div class="dataset-title-row">
+          <strong>${dataset.symbol || "--"}</strong>
+          <span class="dataset-return ${returnClass}">累计收益率 ${formatPercent(returnSummary.returnPct)}</span>
+        </div>
+        <p>${dataset.startDate || "--"} 至 ${dataset.endDate || "--"} · ${actions.length} 条记录 · 买入 ${actionSummary.buy || 0} / 卖出 ${actionSummary.sell || 0} / 观望 ${actionSummary.hold || 0}</p>
+        <small>${returnSummary.completedTrades} 笔完成交易${returnSummary.openPosition ? "，当前仍持仓" : ""} · ${dataset.savedAt ? new Date(dataset.savedAt).toLocaleString() : "未记录保存时间"}</small>
+        <div class="dataset-action-list hidden" id="datasetActions-${dataset.id}">${renderDatasetActions(actions)}</div>
       </div>
       <div class="dataset-actions">
+        <button class="secondary-button" type="button" data-action="toggle-actions" data-id="${dataset.id}" aria-expanded="false">展开操作</button>
         <button class="secondary-button" type="button" data-action="restore" data-id="${dataset.id}">复现</button>
         <button class="secondary-button danger-button" type="button" data-action="delete" data-id="${dataset.id}">删除</button>
       </div>
     </article>
-  `).join("");
+  `;
+  }).join("");
+}
+
+function toggleDatasetActions(recordId, button) {
+  const panel = document.getElementById(`datasetActions-${recordId}`);
+  if (!panel) return;
+  const collapsed = panel.classList.toggle("hidden");
+  button.textContent = collapsed ? "展开操作" : "收起操作";
+  button.setAttribute("aria-expanded", collapsed ? "false" : "true");
 }
 
 async function loadTrainingRecords() {
@@ -832,6 +1016,9 @@ async function restoreTrainingRecord(recordId) {
     label: replayActionLabel(record.action),
     price: Number(record.price) || 0,
   }));
+  const restoredState = replayStateFromActions(dataset.actions || []);
+  replayState.equity = restoredState.equity;
+  replayState.position = restoredState.position;
   replayState.selectedNoteDate = focus.date;
   replayState.sessionId = dataset.id;
   replayState.trainingStartDate = dataset.startDate || first.date || "";
@@ -887,6 +1074,10 @@ function replayChartScale() {
   return { candles, min, max, priceTop, priceBottom, chartHeight, y, priceAtY };
 }
 
+function candleStep(canvasWidth, candleCount) {
+  return (canvasWidth - 64) / Math.max(candleCount - 1, 1);
+}
+
 function nearestManualLevels() {
   const current = currentReplayCandle()?.close || 0;
   const supports = replayState.manualLevels
@@ -900,6 +1091,10 @@ function nearestManualLevels() {
 
 function selectedManualLevel() {
   return replayState.manualLevels.find((level) => level.id === replayState.selectedLevelId) || null;
+}
+
+function createLevelId(prefix = "level") {
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function manualLevelType(level) {
@@ -979,8 +1174,8 @@ function drawReplayChart() {
   const volumeBottom = Math.round(height * 0.78);
   const macdTop = volumeBottom + 20;
   const macdBottom = height - 48;
-  const step = Math.max((width - 64) / candles.length, 4);
-  const bodyWidth = Math.max(Math.min(step * 0.62, 10), 3);
+  const step = candleStep(width, candles.length);
+  const bodyWidth = Math.max(Math.min(step * 0.62, 10), 1);
 
   ctx.strokeStyle = "#edf1f5";
   ctx.lineWidth = 1;
@@ -1139,6 +1334,8 @@ function drawReplayChart() {
 
   if (replayState.hoverIndex !== null && candles[replayState.hoverIndex]) {
     const item = candles[replayState.hoverIndex];
+    const prevItem = candles[replayState.hoverIndex - 1];
+    const changePct = prevItem?.close > 0 ? ((item.close - prevItem.close) / prevItem.close) * 100 : null;
     const x = 48 + replayState.hoverIndex * step;
     const hoverY = Math.max(priceTop, Math.min(priceBottom, replayState.hoverY ?? y(item.close)));
     const hoverPrice = max - ((hoverY - priceTop) / (chartHeight || 1)) * (max - min);
@@ -1153,16 +1350,17 @@ function drawReplayChart() {
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = "#2369b8";
-    ctx.fillRect(width - 72, hoverY - 10, 52, 20);
+    ctx.fillRect(44, hoverY - 10, 56, 20);
     ctx.fillStyle = "#ffffff";
     ctx.font = "12px Microsoft YaHei, sans-serif";
-    ctx.fillText(formatPrice(hoverPrice), width - 66, hoverY + 4);
+    ctx.fillText(formatPrice(hoverPrice), 50, hoverY + 4);
 
     const hoverAnnotations = annotationMap.get(item.date) || [];
     const selectedAnnotations = replayState.selectedNoteDate === item.date ? annotationMap.get(replayState.selectedNoteDate) || [] : [];
     const activeAnnotations = hoverAnnotations.length ? hoverAnnotations : selectedAnnotations;
+    const hoverDateText = replayState.blindMode ? "日期已隐藏" : item.date;
     const lines = [
-      `${item.date}  开:${formatPrice(item.open)} 收:${formatPrice(item.close)} 高:${formatPrice(item.high)} 低:${formatPrice(item.low)}`,
+      `${hoverDateText}  开:${formatPrice(item.open)} 收:${formatPrice(item.close)} 高:${formatPrice(item.high)} 低:${formatPrice(item.low)} 涨跌:${changePct === null ? "--" : formatPercent(changePct)}`,
       `光标价 ${formatPrice(hoverPrice)}`,
       ...activeAnnotations.slice(-3).map((note) => `${replayActionLabel(note.action)}：${note.annotationText}`),
     ];
@@ -1203,7 +1401,7 @@ function updateReplayHover(event) {
   const scaleX = canvas.width / rect.width;
   const scaleY = canvas.height / rect.height;
   const canvasX = x * scaleX;
-  const step = Math.max((canvas.width - 64) / candles.length, 4);
+  const step = candleStep(canvas.width, candles.length);
   const index = Math.round((canvasX - 48) / step);
   replayState.hoverIndex = Math.max(0, Math.min(candles.length - 1, index));
   replayState.hoverY = y * scaleY;
@@ -1252,9 +1450,8 @@ function dragReplayChart(event) {
       level.price = price;
       replayState.dragMoved = true;
       replayState.lastLevelHitId = null;
-      syncManualLevelInputs();
       updateLevelToolUi();
-      drawReplayChart();
+      refreshReplayAdviceFromLevels({ resetFeedback: true });
     }
     return;
   }
@@ -1263,7 +1460,7 @@ function dragReplayChart(event) {
   const candles = replayVisibleCandles();
   if (!canvas || !candles.length) return;
   const rect = canvas.getBoundingClientRect();
-  const step = Math.max((canvas.width - 64) / candles.length, 4);
+  const step = candleStep(canvas.width, candles.length);
   const scaleX = canvas.width / rect.width;
   const delta = (event.clientX - replayState.dragStartX) * scaleX;
   const offsetDelta = Math.round(delta / step);
@@ -1281,9 +1478,8 @@ function endReplayDrag() {
     if (!replayState.dragMoved) {
       replayState.selectedLevelId = replayState.draggingLevelId;
       replayState.drawingLevel = false;
-      syncManualLevelInputs();
       updateLevelToolUi();
-      drawReplayChart();
+      refreshReplayAdviceFromLevels();
       replayState.lastLevelHitId = null;
       replayState.dragMoved = false;
     }
@@ -1302,18 +1498,16 @@ function selectReplayAnnotation(event) {
     replayState.suppressNextCanvasClick = false;
     replayState.lastLevelHitId = null;
     replayState.dragMoved = false;
-    syncManualLevelInputs();
     updateLevelToolUi();
-    drawReplayChart();
+    refreshReplayAdviceFromLevels();
     return;
   }
   if (replayState.lastLevelHitId && !replayState.dragMoved) {
     replayState.selectedLevelId = replayState.lastLevelHitId;
     replayState.lastLevelHitId = null;
     replayState.drawingLevel = false;
-    syncManualLevelInputs();
     updateLevelToolUi();
-    drawReplayChart();
+    refreshReplayAdviceFromLevels();
     return;
   }
   if (replayState.dragMoved) {
@@ -1335,15 +1529,14 @@ function selectReplayAnnotation(event) {
     if (hit) {
       replayState.selectedLevelId = hit.id;
       replayState.drawingLevel = false;
-      syncManualLevelInputs();
       updateLevelToolUi();
-      drawReplayChart();
+      refreshReplayAdviceFromLevels();
       setStatus("#replayStatus", "已选中支撑压力线，可进行对应操作。", "neutral");
       return;
     }
     if (canvasX >= 44 && canvasX <= canvas.width - 20 && canvasY >= scale.priceTop && canvasY <= scale.priceBottom) {
       const level = {
-        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        id: createLevelId("manual"),
         price: Math.max(0.01, scale.priceAtY(canvasY)),
         reason: "",
       };
@@ -1351,16 +1544,14 @@ function selectReplayAnnotation(event) {
       replayState.selectedLevelId = level.id;
       replayState.drawingLevel = false;
       updateLevelToolUi();
-      syncManualLevelInputs();
-      drawReplayChart();
+      refreshReplayAdviceFromLevels({ resetFeedback: true });
       setStatus("#replayStatus", "已添加支撑压力线，可拖动调整，并在画布上方填写画线原因。", "positive");
       return;
     }
     replayState.drawingLevel = false;
     replayState.selectedLevelId = null;
-    syncManualLevelInputs();
     updateLevelToolUi();
-    drawReplayChart();
+    refreshReplayAdviceFromLevels();
     setStatus("#replayStatus", "已退出画线模式。", "neutral");
     return;
   } else if (scale) {
@@ -1368,18 +1559,17 @@ function selectReplayAnnotation(event) {
     const hit = replayState.manualLevels.find((level) => Math.abs(scale.y(level.price) - canvasY) <= 7);
     if (hit) {
       replayState.selectedLevelId = hit.id;
-      syncManualLevelInputs();
       updateLevelToolUi();
-      drawReplayChart();
+      refreshReplayAdviceFromLevels();
       return;
     }
     replayState.selectedLevelId = null;
-    syncManualLevelInputs();
     updateLevelToolUi();
+    refreshReplayAdviceFromLevels();
   }
   const scaleX = canvas.width / rect.width;
   const canvasX = x * scaleX;
-  const step = Math.max((canvas.width - 64) / candles.length, 4);
+  const step = candleStep(canvas.width, candles.length);
   const index = Math.round((canvasX - 48) / step);
   const candle = candles[Math.max(0, Math.min(candles.length - 1, index))];
   const annotations = replayAnnotationMap().get(candle.date) || [];
@@ -1402,9 +1592,8 @@ function deleteSelectedLevel() {
   replayState.manualLevels = replayState.manualLevels.filter((level) => level.id !== selected.id);
   replayState.selectedLevelId = null;
   replayState.drawingLevel = false;
-  syncManualLevelInputs();
   updateLevelToolUi();
-  drawReplayChart();
+  refreshReplayAdviceFromLevels({ resetFeedback: true });
   setStatus("#replayStatus", "已删除选中的支撑压力线。", "neutral");
 }
 
@@ -1418,22 +1607,519 @@ function saveSelectedLevelReason() {
   selected.reason = reasonInput?.value.trim() || "";
   replayState.drawingLevel = false;
   replayState.selectedLevelId = null;
+  updateLevelToolUi();
+  refreshReplayAdviceFromLevels();
+  setStatus("#replayStatus", selected.reason ? "已写入选中线的画线原因。" : "已清空选中线的画线原因。", "positive");
+}
+
+function autoLevelHistory() {
+  const daily = replayState.data?.timeframes?.daily || [];
+  if (!daily.length) return [];
+  return daily.slice(0, replayState.cursor + 1).slice(-700);
+}
+
+function autoLevelSwings(candles, windowSize = 4) {
+  const points = [];
+  for (let index = windowSize; index < candles.length - windowSize; index += 1) {
+    const slice = candles.slice(index - windowSize, index + windowSize + 1);
+    const candle = candles[index];
+    const high = Math.max(...slice.map((item) => item.high));
+    const low = Math.min(...slice.map((item) => item.low));
+    const recency = index / Math.max(candles.length - 1, 1);
+    if (candle.high === high) {
+      points.push({ price: candle.high, kind: "swing_high", weight: 1.2 + recency * 0.6 });
+    }
+    if (candle.low === low) {
+      points.push({ price: candle.low, kind: "swing_low", weight: 1.2 + recency * 0.6 });
+    }
+  }
+  return points;
+}
+
+function autoLevelBodyZones(candles, binPct = 0.012) {
+  const groups = new Map();
+  candles.forEach((candle, index) => {
+    const bodyLow = Math.min(candle.open, candle.close);
+    const bodyHigh = Math.max(candle.open, candle.close);
+    const mid = (bodyLow + bodyHigh) / 2;
+    if (mid <= 0) return;
+    const key = Math.round(mid / (mid * binPct));
+    const group = groups.get(key) || { prices: [], weight: 0 };
+    group.prices.push(mid, bodyLow, bodyHigh);
+    group.weight += 0.55 + (index / Math.max(candles.length - 1, 1)) * 0.35;
+    groups.set(key, group);
+  });
+  return [...groups.values()]
+    .filter((group) => group.prices.length >= 8)
+    .map((group) => ({
+      price: average(group.prices, (value) => value),
+      kind: "body_cluster",
+      weight: group.weight,
+    }));
+}
+
+function clusterAutoLevels(points, currentPrice, mergePct = 0.018) {
+  const sorted = points.filter((point) => point.price > 0).sort((a, b) => a.price - b.price);
+  const clusters = [];
+  sorted.forEach((point) => {
+    const last = clusters.at(-1);
+    if (last && Math.abs(point.price - last.price) / last.price <= mergePct) {
+      last.points.push(point);
+      last.weight += point.weight;
+      last.price = average(last.points, (item) => item.price);
+    } else {
+      clusters.push({ price: point.price, weight: point.weight, points: [point] });
+    }
+  });
+  return clusters.map((cluster) => {
+    const swingHighs = cluster.points.filter((point) => point.kind === "swing_high").length;
+    const swingLows = cluster.points.filter((point) => point.kind === "swing_low").length;
+    const bodyClusters = cluster.points.filter((point) => point.kind === "body_cluster").length;
+    const distancePct = Math.abs(cluster.price - currentPrice) / Math.max(currentPrice, 0.01);
+    const distanceScore = Math.max(0, 2 - distancePct * 10);
+    const type = cluster.price <= currentPrice ? "support" : "resistance";
+    const reasons = [];
+    if (swingLows) reasons.push(`摆动低点${swingLows}次`);
+    if (swingHighs) reasons.push(`摆动高点${swingHighs}次`);
+    if (bodyClusters) reasons.push("K线实体密集区");
+    return {
+      price: cluster.price,
+      type,
+      score: cluster.weight + distanceScore,
+      reason: `自动识别：${reasons.join("，") || "价格反复触碰"}；距离当前价${(distancePct * 100).toFixed(1)}%`,
+    };
+  });
+}
+
+function autoDrawLevelLines({ silent = false } = {}) {
+  if (!replayState.data) {
+    if (!silent) setStatus("#replayStatus", "请先开始训练并加载K线数据。", "negative");
+    return;
+  }
+  const candle = currentReplayCandle();
+  const candles = autoLevelHistory();
+  if (!candle || candles.length < 80) {
+    if (!silent) setStatus("#replayStatus", "可用K线太少，暂时无法自动画线。", "negative");
+    return;
+  }
+  const currentPrice = candle.close;
+  const points = [
+    ...autoLevelSwings(candles, 4),
+    ...autoLevelBodyZones(candles, 0.012),
+  ];
+  const clusters = clusterAutoLevels(points, currentPrice, 0.018)
+    .filter((level) => Math.abs(level.price - currentPrice) / currentPrice <= 0.35);
+  const existingLevels = replayState.manualLevels.filter((level) => level.price > 0);
+  const existingSupport = existingLevels
+    .filter((level) => level.price < currentPrice)
+    .sort((a, b) => (currentPrice - a.price) - (currentPrice - b.price))[0];
+  const existingResistance = existingLevels
+    .filter((level) => level.price > currentPrice)
+    .sort((a, b) => (a.price - currentPrice) - (b.price - currentPrice))[0];
+  const candidateSupport = clusters
+    .filter((level) => level.price < currentPrice)
+    .filter((level) => !existingLevels.some((existing) => Math.abs(existing.price - level.price) / currentPrice <= 0.006))
+    .sort((a, b) => (currentPrice - a.price) - (currentPrice - b.price) || b.score - a.score)[0];
+  const candidateResistance = clusters
+    .filter((level) => level.price > currentPrice)
+    .filter((level) => !existingLevels.some((existing) => Math.abs(existing.price - level.price) / currentPrice <= 0.006))
+    .sort((a, b) => (a.price - currentPrice) - (b.price - currentPrice) || b.score - a.score)[0];
+  const supportLine = existingSupport || candidateSupport;
+  const resistanceLine = existingResistance || candidateResistance;
+  const selected = [
+    existingSupport ? null : candidateSupport,
+    existingResistance ? null : candidateResistance,
+  ].filter(Boolean);
+  if (!supportLine && !resistanceLine) {
+    if (!silent) setStatus("#replayStatus", "没有找到足够可靠的支撑压力候选线。", "negative");
+    return;
+  }
+  let addedCount = 0;
+  selected.forEach((level) => {
+    const duplicate = replayState.manualLevels.some((manual) => Math.abs(manual.price - level.price) / currentPrice <= 0.006);
+    if (duplicate) return;
+    replayState.manualLevels.push({
+      id: level.id || createLevelId("auto"),
+      price: level.price,
+      reason: level.reason,
+      auto: true,
+    });
+    addedCount += 1;
+  });
+  replayState.manualLevels = replayState.manualLevels.sort((a, b) => a.price - b.price);
+  replayState.selectedLevelId = null;
+  replayState.drawingLevel = false;
   syncManualLevelInputs();
   updateLevelToolUi();
-  drawReplayChart();
-  setStatus("#replayStatus", selected.reason ? "已写入选中线的画线原因。" : "已清空选中线的画线原因。", "positive");
+  updateReplayUi();
+  const supportText = supportLine ? `支撑 ${formatPrice(supportLine.price)}` : "下方支撑未找到";
+  const resistanceText = resistanceLine ? `压力 ${formatPrice(resistanceLine.price)}` : "上方压力未找到";
+  const message = `自动线已更新：${supportText}，${resistanceText}。${addedCount ? `本次补齐 ${addedCount} 条。` : "无需新增。"}可继续拖动、删除或写原因。`;
+  if (!silent) setStatus("#replayStatus", message, "positive");
+  return { addedCount, supportLine, resistanceLine, message };
 }
 
 function zoomReplayChart(direction) {
   if (!replayState.data) return;
   const next = replayState.visibleCount + direction * 20;
-  replayState.visibleCount = Math.max(30, Math.min(240, next));
+  replayState.visibleCount = Math.max(30, Math.min(700, next));
   clampReplayDragOffset();
   replayState.hoverIndex = null;
   replayState.hoverY = null;
   replayState.selectedNoteDate = null;
   drawReplayChart();
   setStatus("#replayStatus", `当前显示 ${replayState.visibleCount} 根K线。`, "neutral");
+}
+
+function replayDailyHistory() {
+  const daily = replayState.data?.timeframes?.daily || [];
+  if (!daily.length) return [];
+  return daily.slice(0, replayState.cursor + 1);
+}
+
+function average(items, selector) {
+  if (!items.length) return 0;
+  return items.reduce((sum, item) => sum + selector(item), 0) / items.length;
+}
+
+function ruleRiskRewardLine(candle, supportPrice, resistancePrice, fallbackStop = null) {
+  if (!candle) return null;
+  const entityLow = Math.min(candle.open, candle.close);
+  const stopPrice = fallbackStop || (supportPrice ? Math.min(entityLow, supportPrice * 0.99) : entityLow);
+  if (!resistancePrice || stopPrice <= 0 || candle.close <= stopPrice) {
+    return {
+      ratio: null,
+      text: resistancePrice
+        ? `止损参考 ${formatPrice(stopPrice)}，当前止损空间不理想。`
+        : `止损参考 ${formatPrice(stopPrice)}；未画出上方压力，暂不计算固定盈亏比。`,
+    };
+  }
+  const risk = candle.close - stopPrice;
+  const reward = resistancePrice - candle.close;
+  if (reward <= 0) {
+    return { ratio: 0, text: `止损参考 ${formatPrice(stopPrice)}；当前已经贴近或高于压力位，不适合追。` };
+  }
+  const ratio = reward / risk;
+  return {
+    ratio,
+    text: `止损 ${formatPrice(stopPrice)}，压力 ${formatPrice(resistancePrice)}，盈亏比 ${ratio.toFixed(2)}${ratio >= 3 ? "，满足规则库要求。" : "，暂未达到3以上。"}`
+  };
+}
+
+function ruleLibraryAdvice() {
+  const history = replayDailyHistory();
+  const candle = history.at(-1);
+  if (!candle || history.length < 20) {
+    const waitingAction = replayState.position ? "hold_position" : "watch";
+    return {
+      score: null,
+      side: replayState.position ? "sell" : "buy",
+      sideLabel: replayState.position ? "卖出管理" : "买入观察",
+      action: waitingAction,
+      actionText: replayState.position ? "继续持有" : "建议观望",
+      stage: "等待更多K线",
+      model: "AI建议",
+      matched: ["开始训练后显示模型匹配。"],
+      missing: ["需要先加载足够的K线。"],
+      plan: ["继续推进训练，等待规则库形成可判断的价格结构。"],
+    };
+  }
+  const recent = history.slice(-30);
+  const prev = history.at(-2);
+  const last20 = history.slice(-20);
+  const last60 = history.slice(-60);
+  const last120 = history.slice(-120);
+  const ma5 = average(history.slice(-5), (item) => item.close);
+  const ma10 = average(history.slice(-10), (item) => item.close);
+  const ma20 = average(history.slice(-20), (item) => item.close);
+  const ma60 = average(history.slice(-60), (item) => item.close);
+  const ma120 = average(history.slice(-120), (item) => item.close);
+  const high20 = Math.max(...last20.slice(0, -1).map((item) => item.high));
+  const low20 = Math.min(...last20.map((item) => item.low));
+  const high60 = Math.max(...last60.map((item) => item.high));
+  const low60 = Math.min(...last60.map((item) => item.low));
+  const high120 = Math.max(...last120.map((item) => item.high));
+  const nearest = nearestManualLevels();
+  const support = nearest.support;
+  const resistance = nearest.resistance;
+  const supportPrice = support?.price || null;
+  const resistancePrice = resistance?.price || null;
+  const nearSupport = supportPrice ? Math.abs(candle.close - supportPrice) / candle.close <= 0.035 : false;
+  const brokeSupport = supportPrice ? recent.slice(0, -1).some((item) => item.low < supportPrice * 0.995) : false;
+  const reclaimedSupport = supportPrice ? candle.low < supportPrice && candle.close > supportPrice : false;
+  const bullish = candle.close > candle.open;
+  const shrinkVolume = history.length >= 25 && candle.volume < average(history.slice(-20), (item) => item.volume);
+  const breakout20 = candle.close > high20;
+  const bigDrop = high60 > 0 && (high60 - low20) / high60 >= 0.18;
+  const twoUp = prev && prev.close > prev.open && bullish && candle.close > prev.close;
+  const upStructure = candle.close > ma20 && ma5 >= ma10 && ma10 >= ma20;
+  const weakStructure = candle.close < ma20 && ma5 < ma10;
+  const longUpper = candle.high > Math.max(candle.open, candle.close) * 1.04;
+  const bigBear = candle.close < candle.open && (candle.open - candle.close) / candle.open >= 0.04;
+  const nearResistance = resistancePrice ? Math.abs(resistancePrice - candle.close) / candle.close <= 0.04 : false;
+  const riskReward = ruleRiskRewardLine(candle, supportPrice, resistancePrice);
+  const riskRewardScore = riskReward?.ratio == null ? 0 : riskReward.ratio >= 3 ? 8 : -12;
+  const longDrawdown = high120 > 0 && (high120 - candle.close) / high120 >= 0.25;
+  const recoveryAttempt = candle.close > ma20 || twoUp || reclaimedSupport || breakout20;
+
+  let stage = "盘整结构，等待区间边界确认";
+  if (upStructure) stage = "上升趋势回调/延续观察";
+  if (weakStructure) stage = "弱势结构，只做反弹模型";
+  if (bigDrop && !upStructure) stage = "急跌后修复观察";
+  if (longDrawdown && recoveryAttempt && candle.close >= ma20) stage = "长期下跌后尝试趋势扭转";
+  if (upStructure && high60 > 0 && (high60 - candle.close) / high60 >= 0.12) stage = "上升趋势中的大调整，等待踩稳确认";
+
+  const candidates = [];
+  const side = replayState.position ? "sell" : "buy";
+  const sideLabel = replayState.position ? "卖出管理" : "买入观察";
+  function add(model, score, matched = [], missing = [], plan = [], candidateSide = "buy") {
+    candidates.push({
+      model,
+      score: Math.max(0, Math.min(100, score)),
+      matched: matched.filter(Boolean),
+      missing: missing.filter(Boolean),
+      plan: plan.filter(Boolean),
+      side: candidateSide,
+    });
+  }
+
+  if (replayState.position) {
+    const entryPrice = Number(replayState.position.entryPrice) || 0;
+    const positionReturn = entryPrice ? ((candle.close - entryPrice) / entryPrice) * 100 : null;
+    if (!nearResistance && !longUpper && !bigBear && candle.close >= ma5) {
+      add("持仓观察模型", 58, [
+        "当前未出现明确卖出触发",
+        positionReturn == null ? "" : `当前这笔收益率：${formatPercent(positionReturn)}`,
+        resistancePrice ? `上方压力：${formatPrice(resistancePrice)}，接近后观察是否转弱。` : "未画出上方压力，可补充止盈观察位。",
+      ], [
+        "继续确认买入依据是否仍然有效",
+        supportPrice ? "" : "缺少下方支撑或移动止盈依据",
+      ], [
+        "继续持仓观察，不主动加仓。",
+        "若跌破5日线、买入依据或关键支撑，优先执行保护。",
+        supportPrice ? `下方支撑：${formatPrice(supportPrice)}，跌破需重新评估持仓依据。` : "未画出下方支撑，可补充移动止盈依据。",
+      ], "sell");
+    }
+  }
+  if (nearSupport && bullish) {
+    add("支撑验证买入模型", 62 + (shrinkVolume ? 10 : 0) + riskRewardScore, [
+      supportPrice ? `价格接近关键支撑 ${formatPrice(supportPrice)}` : "价格接近手动画出的支撑区域",
+      "支撑上方出现阳线或向上反应",
+      riskReward?.ratio >= 3 ? "止损到上方压力的盈亏比满足3以上" : "",
+    ], [
+      shrinkVolume ? "" : "还需要回踩缩量",
+      "还需要再次确认支撑不被有效跌破",
+    ], [
+      "若下一根K线继续站稳支撑上方，可考虑买入。",
+      "止损放在支撑下沿或确认K线实体下沿。",
+      riskReward?.text || "",
+    ], "buy");
+  }
+  if (supportPrice && (reclaimedSupport || (brokeSupport && candle.close > supportPrice && bullish))) {
+    add("跌破支撑后快速拉回模型", 78 + (shrinkVolume ? 8 : 0) + riskRewardScore, [
+      `跌破关键支撑 ${formatPrice(supportPrice)} 后快速收回`,
+      "收盘重新回到支撑上方",
+      "止损距离相对较小",
+      riskReward?.ratio >= 3 ? "上方压力空间满足盈亏比要求" : "",
+    ], [
+      shrinkVolume ? "" : "还需要再次回踩支撑不破，或出现缩量企稳",
+      resistancePrice ? "" : "缺少上方压力，暂无法判断固定止盈空间",
+    ], [
+      "若下一根K线站稳支撑上方，可考虑买入。",
+      "止损放在拉回K线实体下沿，或支撑下沿。",
+      resistancePrice && riskReward?.ratio !== null && riskReward.ratio < 3 ? "若上方压力空间不足，放弃。" : "",
+      riskReward?.text || "",
+    ], "buy");
+  }
+  if (breakout20 && bullish) {
+    const breakoutRisk = ruleRiskRewardLine(candle, supportPrice, resistancePrice, Math.min(candle.open, candle.close));
+    add("平台/交易密集区突破模型", 72 + (breakoutRisk?.ratio >= 3 ? 6 : 0), [
+      "当前突破近20日交易区间上沿",
+      "突破K线收阳",
+      `近期突破参考价：${formatPrice(high20)}`,
+    ], [
+      "还需要突破后回踩不破确认",
+      supportPrice ? "" : "缺少可参考的下方支撑线",
+    ], [
+      "不追高，优先等待回踩平台上沿不破。",
+      "止损参考平台下沿或突破K线实体下沿。",
+      "若离支撑太远，先观望等待回踩。",
+      breakoutRisk?.text || "",
+    ], "buy");
+  }
+  if (bigDrop && twoUp) {
+    add("急跌后快速修复模型", 70, [
+      "前期出现快速急跌",
+      "当前出现连续两天上涨或快速修复",
+    ], [
+      "还需要形成小平台或关键支撑",
+      "反弹模型不能按趋势仓位处理",
+    ], [
+      "只按超跌反弹计划处理，仓位保持克制。",
+      "止损必须贴近修复K线或小平台下沿。",
+      "接近压力后要优先考虑止盈。",
+    ], "buy");
+  }
+  if (replayState.position && (nearResistance || longUpper || bigBear || candle.close < ma5)) {
+    add("卖出/止盈风险模型", 86, [
+      nearResistance && resistancePrice ? `价格接近压力 ${formatPrice(resistancePrice)}` : "",
+      candle.close < ma5 ? "跌破5日线" : "",
+      longUpper || bigBear ? "出现上引线或阴线转弱" : "",
+    ], [
+      "需要确认是否跌破买入依据或移动止盈位",
+    ], [
+      "优先检查移动止盈，保护当前利润。",
+      nearResistance && resistancePrice ? `接近压力：${formatPrice(resistancePrice)}` : "",
+      longUpper || bigBear ? "若下一根继续转弱，可考虑卖出或减仓。" : "",
+    ], "sell");
+  }
+
+  const sideCandidates = candidates.filter((candidate) => candidate.side === side);
+  if (!sideCandidates.length) {
+    return {
+      score: 38,
+      side,
+      sideLabel,
+      action: replayState.position ? "hold_position" : "watch",
+      actionText: replayState.position ? "继续持有" : "建议观望",
+      stage,
+      model: replayState.position ? "暂无卖出触发模型" : "暂无买入触发模型",
+      matched: [
+        replayState.position ? "当前持仓中，尚未形成明确卖出触发。" : "当前空仓中，尚未形成完整买入触发。",
+        supportPrice ? `下方支撑：${formatPrice(supportPrice)}` : "可先画出最近支撑线。",
+        resistancePrice ? `上方压力：${formatPrice(resistancePrice)}` : "可补充上方压力线。",
+      ].filter(Boolean),
+      missing: [
+        replayState.position ? "缺少跌破买入依据、压力转弱或移动止盈触发。" : "缺少支撑验证、跌破拉回或平台突破。",
+        supportPrice ? "" : "缺少手动画出的关键支撑。",
+        resistancePrice ? "" : "缺少手动画出的上方压力。",
+      ].filter(Boolean),
+      plan: [
+        replayState.position ? "继续按持仓管理观察，不因买入模型再次加仓。" : "优先观望，等待结构更完整。",
+        replayState.position ? "若出现跌破5日线、跌破买入依据或压力位转弱，再考虑卖出。" : riskReward?.text || "",
+        replayState.position ? "" : "离支撑太远或压力太近时，不追。",
+      ].filter(Boolean),
+    };
+  }
+  sideCandidates.sort((a, b) => b.score - a.score);
+  const best = sideCandidates[0];
+  let action = "watch";
+  let actionText = "建议观望";
+  if (side === "buy") {
+    const hasBlockingRiskReward = best.plan.some((item) => item.includes("空间不足") || item.includes("暂未达到3以上"));
+    const confirmationMissing = best.missing.length > 0;
+    if (best.score >= 80 && !hasBlockingRiskReward && !confirmationMissing) {
+      action = "buy";
+      actionText = "建议买入";
+    } else if (best.score >= 72 && !hasBlockingRiskReward) {
+      action = "watch";
+      actionText = "建议观望";
+      best.plan = ["接近买入模型，但仍需等待确认后再执行。", ...best.plan];
+    }
+  } else {
+    if (best.model.includes("卖出") && best.score >= 75) {
+      action = "sell";
+      actionText = "建议卖出";
+    } else {
+      action = "hold_position";
+      actionText = "继续持有";
+    }
+  }
+  return { side, sideLabel, action, actionText, stage, ...best };
+}
+
+function renderRuleAdvice() {
+  const stageNode = document.querySelector("#ruleAdviceStage");
+  const scoreNode = document.querySelector("#ruleAdviceScore");
+  const sideNode = document.querySelector("#ruleAdviceSide");
+  const bodyNode = document.querySelector("#ruleAdviceBody");
+  if (!stageNode || !scoreNode || !bodyNode) return;
+  const advice = ruleLibraryAdvice();
+  stageNode.textContent = advice.stage || "--";
+  scoreNode.textContent = advice.score == null ? "--" : `${Math.round(advice.score)}分`;
+  scoreNode.className = advice.score >= 75 ? "positive-text" : advice.score >= 60 ? "" : "negative-text";
+  if (sideNode) {
+    sideNode.textContent = advice.sideLabel || (advice.side === "sell" ? "卖出管理" : "买入观察");
+    sideNode.classList.toggle("sell", advice.side === "sell");
+  }
+  const listHtml = (items = []) => {
+    if (!items.length) return `<p class="muted">暂无</p>`;
+    return `<ol>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>`;
+  };
+  bodyNode.innerHTML = `
+    <div class="rule-action-card ${escapeHtml(advice.action || "watch")}">
+      <span>操作建议</span>
+      <strong>${escapeHtml(advice.actionText || "建议观望")}</strong>
+    </div>
+    <div class="rule-advice-section">
+      <span>当前状态</span>
+      <p>${escapeHtml(advice.sideLabel || "--")}</p>
+    </div>
+    <div class="rule-advice-section">
+      <span>当前阶段</span>
+      <p>${escapeHtml(advice.stage || "--")}</p>
+    </div>
+    <div class="rule-advice-section">
+      <span>匹配模型</span>
+      <p>${escapeHtml(advice.model || "--")}${advice.score == null ? "" : `，匹配度 ${Math.round(advice.score)} 分`}</p>
+    </div>
+    <div class="rule-advice-section">
+      <span>符合特征</span>
+      ${listHtml(advice.matched || [])}
+    </div>
+    <div class="rule-advice-section">
+      <span>缺少确认</span>
+      ${listHtml(advice.missing || [])}
+    </div>
+    <div class="rule-advice-section">
+      <span>交易计划</span>
+      ${listHtml(advice.plan || [])}
+    </div>
+  `;
+}
+
+function setAiAdviceFeedback(value) {
+  replayState.aiAdviceFeedback = value;
+  updateAiAdviceFeedbackUi();
+}
+
+function resetAiAdviceFeedback() {
+  replayState.aiAdviceFeedback = null;
+  const reasonInput = document.querySelector("#aiDisagreeReason");
+  if (reasonInput) reasonInput.value = "";
+  updateAiAdviceFeedbackUi();
+}
+
+function updateAiAdviceFeedbackUi() {
+  const feedback = replayState.aiAdviceFeedback;
+  document.querySelectorAll(".ai-feedback-button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.aiFeedback === feedback);
+    button.setAttribute("aria-pressed", String(button.dataset.aiFeedback === feedback));
+  });
+  document.querySelector("#aiDisagreeReasonWrap")?.classList.toggle("hidden", feedback !== "rejected");
+}
+
+function currentAiAdviceSnapshot() {
+  const advice = ruleLibraryAdvice();
+  return {
+    side: advice.side || "",
+    sideLabel: advice.sideLabel || "",
+    action: advice.action || "",
+    actionText: advice.actionText || "",
+    stage: advice.stage || "",
+    model: advice.model || "",
+    score: advice.score == null ? null : Math.round(advice.score),
+    matched: advice.matched || [],
+    missing: advice.missing || [],
+    plan: advice.plan || [],
+  };
+}
+
+function refreshReplayAdviceFromLevels({ resetFeedback = false } = {}) {
+  syncManualLevelInputs();
+  renderRuleAdvice();
+  drawReplayChart();
+  if (resetFeedback) resetAiAdviceFeedback();
 }
 
 function updateReplayUi() {
@@ -1443,7 +2129,9 @@ function updateReplayUi() {
   const hasPosition = Boolean(entryPrice && replayState.position);
   const currentReturn = hasPosition && candle ? ((candle.close - entryPrice) / entryPrice) * 100 : null;
   const totalReturn = ((replayState.equity || 1) - 1) * 100;
-  document.querySelector("#replayTitle").textContent = replayState.data ? `${replayState.data.symbol} 回放训练` : "等待开始";
+  document.querySelector("#replayTitle").textContent = replayState.data
+    ? `${replayState.blindMode ? "盲选样本" : replayState.data.symbol} 回放训练`
+    : "等待开始";
   updateReplayCurrentDate();
   document.querySelector("#replayClose").textContent = candle ? formatPrice(candle.close) : "--";
   document.querySelector("#replayEntryPrice").textContent = hasPosition ? formatPrice(entryPrice) : "空仓";
@@ -1458,6 +2146,8 @@ function updateReplayUi() {
   document.querySelector("#replaySell").disabled = !replayState.data || !replayState.position;
   document.querySelector("#replayHold").disabled = !replayState.data;
   updateReplayWriteToggle();
+  updateReplayDecisionMode();
+  updateAiAdviceFeedbackUi();
   document.querySelector("#replayLog").innerHTML = replayState.log
     .filter((item) => item.action !== "hold" || item.note)
     .slice(-8)
@@ -1468,6 +2158,7 @@ function updateReplayUi() {
       <span>${replayActionLabel(item.action)}</span>
     </article>
   `).join("");
+  renderRuleAdvice();
   drawReplayChart();
 }
 
@@ -1475,6 +2166,9 @@ function replayPayload(action, reason, note, shouldWrite = replayState.writeTrai
   const candle = currentReplayCandle();
   const stopLoss = Number(document.querySelector("#replayStopLoss").value) || null;
   const stopLossReason = document.querySelector("#replayStopLossReason").value.trim();
+  const aiAdviceSnapshot = currentAiAdviceSnapshot();
+  const aiAdviceFeedback = replayState.aiAdviceFeedback;
+  const aiAdviceDisagreeReason = document.querySelector("#aiDisagreeReason")?.value.trim() || "";
   syncManualLevelInputs();
   const nearest = nearestManualLevels();
   const support = Number(document.querySelector("#replaySupport").value) || null;
@@ -1498,6 +2192,15 @@ function replayPayload(action, reason, note, shouldWrite = replayState.writeTrai
     stopLossReason,
     reason,
     note,
+    aiAdviceAction: aiAdviceSnapshot.action,
+    aiAdviceText: aiAdviceSnapshot.actionText,
+    aiAdviceScore: aiAdviceSnapshot.score,
+    aiAdviceModel: aiAdviceSnapshot.model,
+    aiAdviceStage: aiAdviceSnapshot.stage,
+    aiAdviceSide: aiAdviceSnapshot.side,
+    aiAdviceAccepted: aiAdviceFeedback === "accepted" ? true : aiAdviceFeedback === "rejected" ? false : null,
+    aiAdviceDisagreeReason,
+    aiAdviceSnapshot,
     writeTraining: shouldWrite,
     trainingEquityBefore: replayState.equity || 1,
     trainingReturnBefore: ((replayState.equity || 1) - 1) * 100,
@@ -1514,6 +2217,8 @@ async function saveReplayDecision(action) {
   const stopLossReason = document.querySelector("#replayStopLossReason").value.trim();
   const sellReason = document.querySelector("#replaySellReason").value.trim();
   const holdNote = document.querySelector("#replayHoldNote").value.trim();
+  const aiAdviceFeedback = replayState.aiAdviceFeedback;
+  const aiAdviceDisagreeReason = document.querySelector("#aiDisagreeReason")?.value.trim() || "";
   if (action === "buy" && !buyReason) {
     setStatus("#replayStatus", "买入前需要填写买入理由。", "negative");
     return;
@@ -1533,6 +2238,14 @@ async function saveReplayDecision(action) {
   const reason = action === "buy" ? buyReason : action === "sell" ? sellReason : "观望";
   const note = action === "hold" ? holdNote : reason;
   const shouldWrite = shouldWriteReplayDecision(action, note);
+  if (shouldWrite && !aiAdviceFeedback) {
+    setStatus("#replayStatus", "写入真实训练前需要选择是否认可AI建议。", "negative");
+    return;
+  }
+  if (shouldWrite && aiAdviceFeedback === "rejected" && !aiAdviceDisagreeReason) {
+    setStatus("#replayStatus", "不认可AI建议时需要填写原因。", "negative");
+    return;
+  }
   const payload = replayPayload(action, reason, note, shouldWrite);
   if (shouldWrite) {
     const response = await fetch(apiUrl("/api/trade-replay-decision"), {
@@ -1563,6 +2276,7 @@ async function saveReplayDecision(action) {
   }
   if (action === "sell") document.querySelector("#replaySellReason").value = "";
   if (action === "hold") document.querySelector("#replayHoldNote").value = "";
+  resetAiAdviceFeedback();
   replayState.cursor += 1;
   const daily = replayState.data.timeframes.daily;
   if (replayState.cursor >= daily.length) {
@@ -1579,12 +2293,12 @@ async function saveReplayDecision(action) {
   updateReplayUi();
 }
 
-async function loadTradeReplay({ button, symbol, date, blind = false, loadingText = "正在加载...", sessionId = null }) {
+async function loadTradeReplay({ button, symbol, date, blind = false, loadingText = "正在加载...", sessionId = null, fresh = false, throwOnError = false }) {
   const previousText = button.textContent;
   try {
     button.disabled = true;
     button.textContent = loadingText;
-    setStatus("#replayStatus", "正在拉取700个交易日前后的历史数据...", "neutral");
+    setStatus("#replayStatus", "正在从本地行情数据库读取K线数据...", "neutral");
     const response = await fetch(apiUrl("/api/trade-replay"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1592,6 +2306,7 @@ async function loadTradeReplay({ button, symbol, date, blind = false, loadingTex
         symbol,
         date,
         lookback: 700,
+        fresh,
       }),
     });
     const data = await response.json();
@@ -1603,7 +2318,7 @@ async function loadTradeReplay({ button, symbol, date, blind = false, loadingTex
       position: null,
       equity: 1,
       log: [],
-      visibleCount: 120,
+      visibleCount: 700,
       dragOffset: 0,
       hoverIndex: null,
       hoverY: null,
@@ -1625,13 +2340,22 @@ async function loadTradeReplay({ button, symbol, date, blind = false, loadingTex
       trainingRecords: replayState.trainingRecords || [],
       sessionId: sessionId || createTrainingSessionId(symbol, data.startDate),
       trainingStartDate: data.startDate,
+      aiAdviceFeedback: null,
     };
     document.querySelectorAll(".timeframe-button").forEach((item) => item.classList.toggle("active", item.dataset.frame === "daily"));
-    setStatus("#replayStatus", blind ? "随机盲训已开始，股票和日期已隐藏。" : "训练已开始。", "positive");
+    const historyCount = data.availableHistory || data.cursor + 1;
+    const requestedLookback = data.requestedLookback || 700;
+    const historyMessage = historyCount >= requestedLookback
+      ? `已加载当前日前${requestedLookback}根K线。`
+      : `当前日期前只有${historyCount}根可用K线，已加载此前全部可用K线。`;
     updateReplayUi();
+    const autoResult = autoDrawLevelLines({ silent: true });
+    const autoMessage = autoResult ? "已自动画出当前上下关键线。" : "自动画线未找到足够可靠的位置。";
+    setStatus("#replayStatus", blind ? `随机盲训已开始，股票和日期已隐藏。${historyMessage}${autoMessage}` : `训练已开始。${historyMessage}${autoMessage}`, historyCount >= 700 ? "positive" : "neutral");
     updateReplayBlindUi();
   } catch (error) {
     setStatus("#replayStatus", error.message, "negative");
+    if (throwOnError) throw error;
   } finally {
     button.disabled = false;
     button.textContent = previousText;
@@ -1651,21 +2375,27 @@ async function startBlindTradeReplay() {
   try {
     button.disabled = true;
     let lastError = null;
-    for (let attempt = 1; attempt <= 8; attempt += 1) {
+    const maxAttempts = 20;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        button.textContent = `正在抽取 ${attempt}/8`;
+        button.textContent = `正在抽取 ${attempt}/${maxAttempts}`;
         setStatus("#replayStatus", `正在随机抽取股票和时间，第 ${attempt} 次...`, "neutral");
         const response = await fetch(apiUrl("/api/random-training-sample"));
         const sample = await response.json();
         if (!response.ok) throw new Error(sample.error || "随机样本获取失败。");
+        replayState.blindMode = true;
+        replayState.blindSymbol = sample.symbol;
+        replayState.blindDate = sample.date;
+        updateReplayBlindUi();
         document.querySelector("#replaySymbol").value = sample.symbol;
         document.querySelector("#replayDate").value = sample.date;
-        await loadTradeReplay({ button, symbol: sample.symbol, date: sample.date, blind: true, loadingText: "正在加载..." });
+        await loadTradeReplay({ button, symbol: sample.symbol, date: sample.date, blind: true, loadingText: "正在加载...", fresh: Boolean(sample.fresh), throwOnError: true });
         return;
       } catch (error) {
         lastError = error;
-        const retryable = /earlier than available market data|No daily data|Not enough/i.test(error.message || "");
+        const retryable = /earlier than available market data|No daily data|Not enough|分批拉取日线失败|数据拉取失败|request failed|request failure|RemoteDisconnected|Connection aborted|closed connection|without response|Failed to fetch|Eastmoney daily data request failed|Tencent daily data request failed/i.test(error.message || "");
         if (!retryable) throw error;
+        setStatus("#replayStatus", `本次随机样本数据源失败，正在换一组重试 ${attempt}/${maxAttempts}...`, "neutral");
       }
     }
     throw new Error(`随机盲训连续抽取失败：${lastError?.message || "没有可用样本"}`);
@@ -2157,6 +2887,36 @@ document.querySelector("#startReplay")?.addEventListener("click", startTradeRepl
 document.querySelector("#startBlindReplay")?.addEventListener("click", startBlindTradeReplay);
 document.querySelector("#revealReplayIdentity")?.addEventListener("click", revealReplayIdentity);
 document.querySelector("#replayWriteToggle")?.addEventListener("click", toggleReplayWriteMode);
+document.querySelector("#replayStockSearch")?.addEventListener("input", scheduleReplayStockSearch);
+document.querySelector("#replayStockSearch")?.addEventListener("keyup", scheduleReplayStockSearch);
+document.querySelector("#replayStockSearch")?.addEventListener("change", searchReplayStock);
+document.querySelector("#replayStockSearch")?.addEventListener("focus", () => {
+  if (document.querySelector("#replayStockSearch")?.value.trim()) scheduleReplayStockSearch();
+});
+document.querySelector("#stockSearchResults")?.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-symbol]");
+  if (!button) return;
+  selectStockSearchResult({
+    symbol: button.dataset.symbol,
+    name: button.dataset.name,
+    initials: button.dataset.initials,
+  });
+});
+document.querySelector("#stockSearchResults")?.addEventListener("mousedown", (event) => {
+  const button = event.target.closest("button[data-symbol]");
+  if (!button) return;
+  event.preventDefault();
+  selectStockSearchResult({
+    symbol: button.dataset.symbol,
+    name: button.dataset.name,
+    initials: button.dataset.initials,
+  });
+});
+document.addEventListener("click", (event) => {
+  if (event.target.closest(".stock-search-label")) return;
+  hideStockSearchResults();
+});
+document.querySelector("#autoLevelLines")?.addEventListener("click", autoDrawLevelLines);
 document.querySelector("#drawLevelLine")?.addEventListener("click", () => {
   replayState.drawingLevel = !replayState.drawingLevel;
   updateLevelToolUi();
@@ -2166,8 +2926,7 @@ document.querySelector("#clearLevelLines")?.addEventListener("click", () => {
   replayState.selectedLevelId = null;
   replayState.drawingLevel = false;
   updateLevelToolUi();
-  syncManualLevelInputs();
-  drawReplayChart();
+  refreshReplayAdviceFromLevels({ resetFeedback: true });
   setStatus("#replayStatus", "已清空画布上的支撑压力线。", "neutral");
 });
 document.querySelector("#deleteSelectedLevel")?.addEventListener("click", deleteSelectedLevel);
@@ -2175,10 +2934,14 @@ document.querySelector("#saveSelectedLevelReason")?.addEventListener("click", sa
 document.querySelector("#replayBuy")?.addEventListener("click", () => saveReplayDecision("buy"));
 document.querySelector("#replaySell")?.addEventListener("click", () => saveReplayDecision("sell"));
 document.querySelector("#replayHold")?.addEventListener("click", () => saveReplayDecision("hold"));
+document.querySelectorAll(".ai-feedback-button").forEach((button) => {
+  button.addEventListener("click", () => setAiAdviceFeedback(button.dataset.aiFeedback));
+});
 document.querySelector("#refreshTrainingRecords")?.addEventListener("click", loadTrainingRecords);
 document.querySelector("#trainingRecordList")?.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
+  if (button.dataset.action === "toggle-actions") toggleDatasetActions(button.dataset.id, button);
   if (button.dataset.action === "restore") restoreTrainingRecord(button.dataset.id);
   if (button.dataset.action === "delete") deleteTrainingRecord(button.dataset.id);
 });
@@ -2194,7 +2957,7 @@ document.querySelectorAll(".timeframe-button").forEach((button) => {
   });
 });
 ["#replaySupport", "#replayResistance"].forEach((selector) => {
-  document.querySelector(selector)?.addEventListener("input", drawReplayChart);
+  document.querySelector(selector)?.addEventListener("input", () => refreshReplayAdviceFromLevels({ resetFeedback: true }));
 });
 document.querySelector("#replayChart")?.addEventListener("mousemove", updateReplayHover);
 document.querySelector("#replayChart")?.addEventListener("mousedown", startReplayDrag);

@@ -1,11 +1,13 @@
 import json
 import os
 import random
+import sqlite3
 import time
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 import requests
@@ -16,7 +18,6 @@ from support_resistance_trainer import analyze, fetch_akshare_daily, fetch_aksha
 RANDOM_SYMBOLS = [
     "000001",
     "000333",
-    "000651",
     "000858",
     "002594",
     "300059",
@@ -27,8 +28,24 @@ RANDOM_SYMBOLS = [
     "601318",
 ]
 
+RANDOM_SYMBOL_LISTING_DATES = {
+    "000001": "1991-04-03",
+    "000333": "2013-09-18",
+    "000858": "1998-04-27",
+    "002594": "2011-06-30",
+    "300059": "2010-03-19",
+    "300750": "2018-06-11",
+    "600036": "2002-04-09",
+    "600519": "2001-08-27",
+    "600887": "1996-03-12",
+    "601318": "2007-03-01",
+}
+
 CACHE_DIR = Path("data_cache")
+MARKET_DB = Path("market_data.sqlite")
 TRADE_REPLAY_DATASET = Path("trade_replay_samples.jsonl")
+STOCK_NAME_INDEX = Path("stock_names.json")
+MARKET_HISTORY_START = pd.Timestamp("1990-01-01")
 PROXY_ENV_KEYS = (
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -75,6 +92,18 @@ def fetch_with_retry(fetcher, symbol, start_ts, analysis_ts, label, attempts=3):
     raise RuntimeError(f"{label}数据拉取失败，已重试{attempts}次：{last_error}")
 
 
+def fetch_akshare_daily_quick(symbol, start_ts, analysis_ts, timeout=12):
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fetch_akshare_daily, symbol, start_ts, analysis_ts)
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError as exc:
+        future.cancel()
+        raise RuntimeError(f"AkShare daily data request timed out for {symbol} after {timeout}s") from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
 def cache_path(symbol, start_ts, analysis_ts, period):
     CACHE_DIR.mkdir(exist_ok=True)
     return CACHE_DIR / f"{symbol}_{period}_{start_ts.strftime('%Y%m%d')}_{analysis_ts.strftime('%Y%m%d')}.csv"
@@ -94,10 +123,10 @@ def fetch_tencent_daily(symbol, start_ts, analysis_ts):
     response = session.get(
         "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
         params={
-            "param": f"{market_symbol(symbol)},day,{start_ts.strftime('%Y-%m-%d')},{analysis_ts.strftime('%Y-%m-%d')},1500,qfq"
+            "param": f"{market_symbol(symbol)},day,{start_ts.strftime('%Y-%m-%d')},{analysis_ts.strftime('%Y-%m-%d')},5000,qfq"
         },
         headers={"User-Agent": "Mozilla/5.0"},
-        timeout=20,
+        timeout=8,
     )
     response.raise_for_status()
     payload = response.json()
@@ -122,11 +151,11 @@ def fetch_tencent_daily(symbol, start_ts, analysis_ts):
     return load_normalized_dataframe(rows)
 
 
-def fetch_eastmoney_daily(symbol, start_ts, analysis_ts):
+def fetch_eastmoney_daily(symbol, start_ts, analysis_ts, attempts=3):
     last_error = None
     response = None
     success = False
-    for attempt in range(1, 4):
+    for attempt in range(1, attempts + 1):
         session = requests.Session()
         session.trust_env = False
         try:
@@ -143,14 +172,14 @@ def fetch_eastmoney_daily(symbol, start_ts, analysis_ts):
                     "end": analysis_ts.strftime("%Y%m%d"),
                 },
                 headers={"User-Agent": "Mozilla/5.0"},
-                timeout=20,
+                timeout=8,
             )
             response.raise_for_status()
             success = True
             break
         except Exception as exc:
             last_error = exc
-            if attempt < 3:
+            if attempt < attempts:
                 time.sleep(1.2 * attempt)
     if not success or response is None:
         raise RuntimeError(f"Eastmoney daily data request failed for {symbol}: {last_error}")
@@ -202,6 +231,115 @@ def daily_to_monthly(df):
     return monthly.drop(columns=["month"], errors="ignore").reset_index(drop=True)
 
 
+def ensure_market_db():
+    if not MARKET_DB.exists():
+        raise ValueError("本地行情数据库不存在，请先导入行情数据 market_data.sqlite。")
+
+
+def market_db_connect():
+    ensure_market_db()
+    conn = sqlite3.connect(MARKET_DB)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def load_local_daily(symbol, start_ts=None, end_ts=None):
+    symbol = str(symbol).strip().zfill(6)
+    conditions = ["symbol = ?"]
+    params = [symbol]
+    if start_ts is not None:
+        conditions.append("trade_date >= ?")
+        params.append(pd.Timestamp(start_ts).strftime("%Y-%m-%d"))
+    if end_ts is not None:
+        conditions.append("trade_date <= ?")
+        params.append(pd.Timestamp(end_ts).strftime("%Y-%m-%d"))
+    query = f"""
+        SELECT trade_date AS date, open, high, low, close, volume, amount, turnover
+        FROM daily_prices
+        WHERE {' AND '.join(conditions)}
+        ORDER BY trade_date
+    """
+    with market_db_connect() as conn:
+        df = pd.read_sql_query(query, conn, params=params)
+    if df.empty:
+        raise ValueError(f"本地数据库没有 {symbol} 在指定日期范围内的日线数据。")
+    df["date"] = pd.to_datetime(df["date"])
+    for column in ["open", "high", "low", "close", "volume", "amount", "turnover"]:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+    return df.dropna(subset=["date", "open", "high", "low", "close"]).reset_index(drop=True)
+
+
+def local_symbols():
+    with market_db_connect() as conn:
+        rows = conn.execute("SELECT symbol FROM daily_prices GROUP BY symbol ORDER BY symbol").fetchall()
+    return [row["symbol"] for row in rows]
+
+
+def load_stock_name_index():
+    symbols = set(local_symbols())
+    records = []
+    if STOCK_NAME_INDEX.exists():
+        with STOCK_NAME_INDEX.open("r", encoding="utf-8") as handle:
+            for item in json.load(handle):
+                symbol = str(item.get("symbol", "")).strip().zfill(6)
+                if symbol not in symbols:
+                    continue
+                records.append({
+                    "symbol": symbol,
+                    "name": str(item.get("name", "")).strip(),
+                    "initials": str(item.get("initials", "")).strip().upper(),
+                })
+    indexed = {item["symbol"] for item in records}
+    records.extend({"symbol": symbol, "name": "", "initials": ""} for symbol in sorted(symbols - indexed))
+    return records
+
+
+def search_stock_names(query, limit=20):
+    text = str(query or "").strip()
+    if not text:
+        return {"matches": [], "count": 0}
+    upper = text.upper()
+    records = load_stock_name_index()
+    matches = []
+    for item in records:
+        symbol = item["symbol"]
+        name = item.get("name") or ""
+        initials = item.get("initials") or ""
+        score = None
+        if symbol == text.zfill(6) or symbol.startswith(text):
+            score = 0
+        elif name == text:
+            score = 1
+        elif initials == upper:
+            score = 2
+        elif name.startswith(text):
+            score = 3
+        elif initials.startswith(upper):
+            score = 4
+        elif text in name:
+            score = 5
+        if score is None:
+            continue
+        matches.append({**item, "displayName": name or symbol, "_score": score})
+    matches.sort(key=lambda item: (item["_score"], item["symbol"]))
+    limited = [{key: value for key, value in item.items() if key != "_score"} for item in matches[:int(limit)]]
+    return {"matches": limited, "count": len(matches)}
+
+
+def local_trade_dates(symbol, start_bound, end_bound):
+    with market_db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT trade_date FROM daily_prices
+            WHERE symbol = ? AND trade_date >= ? AND trade_date <= ?
+            ORDER BY trade_date
+            """,
+            (str(symbol).zfill(6), pd.Timestamp(start_bound).strftime("%Y-%m-%d"), pd.Timestamp(end_bound).strftime("%Y-%m-%d")),
+        ).fetchall()
+    return [pd.Timestamp(row["trade_date"]) for row in rows]
+
+
 def candles_to_records(df):
     return [
         {
@@ -219,11 +357,40 @@ def candles_to_records(df):
 def fetch_direct_fallback(symbol, start_ts, analysis_ts, period):
     try:
         daily = fetch_tencent_daily(symbol, start_ts, analysis_ts)
-    except Exception:
-        daily = fetch_eastmoney_daily(symbol, start_ts, analysis_ts)
+    except Exception as tencent_error:
+        try:
+            daily = fetch_eastmoney_daily(symbol, start_ts, analysis_ts, attempts=1)
+        except Exception as eastmoney_error:
+            raise RuntimeError(f"Tencent daily data request failed for {symbol}: {tencent_error}; Eastmoney daily data request failed for {symbol}: {eastmoney_error}") from eastmoney_error
     if period == "weekly":
         return daily_to_weekly(daily)
     return daily
+
+
+def fetch_daily_batched(symbol, start_ts, analysis_ts, candles_per_batch=50, max_consecutive_errors=3):
+    frames = []
+    errors = []
+    consecutive_errors = 0
+    batch_start = pd.Timestamp(start_ts)
+    analysis_ts = pd.Timestamp(analysis_ts)
+    batch_days = max(int(candles_per_batch / 5 * 7) + 5, 30)
+    while batch_start <= analysis_ts:
+        batch_end = min(batch_start + pd.Timedelta(days=batch_days - 1), analysis_ts)
+        try:
+            frames.append(fetch_direct_fallback(symbol, batch_start, batch_end, "daily"))
+            consecutive_errors = 0
+        except Exception as exc:
+            errors.append(f"{batch_start.strftime('%Y-%m-%d')}~{batch_end.strftime('%Y-%m-%d')}: {exc}")
+            consecutive_errors += 1
+            if not frames and consecutive_errors >= max_consecutive_errors:
+                raise RuntimeError(f"分批拉取日线失败：{'; '.join(errors[-max_consecutive_errors:])}")
+        batch_start = batch_end + pd.Timedelta(days=1)
+        time.sleep(0.15)
+    if not frames:
+        raise RuntimeError(f"分批拉取日线失败：{'; '.join(errors[-3:])}")
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged.sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+    return merged
 
 
 def cached_paths(symbol, period):
@@ -251,10 +418,33 @@ def load_nearest_cache(symbol, period, start_ts, analysis_ts, anchor_ts=None):
     return fallback
 
 
+def load_merged_cache(symbol, period, start_ts, analysis_ts):
+    frames = []
+    for path in cached_paths(symbol, period):
+        try:
+            df = load_csv(path)
+        except Exception:
+            continue
+        filtered = df[(df["date"] >= start_ts) & (df["date"] <= analysis_ts)].copy()
+        if not filtered.empty:
+            frames.append(filtered)
+    if not frames:
+        return None
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged.sort_values("date").drop_duplicates(subset=["date"], keep="last")
+    return merged.reset_index(drop=True)
+
+
 def covers_anchor(df, anchor_ts):
     if anchor_ts is None or df.empty:
         return True
     return df["date"].min() <= anchor_ts <= df["date"].max()
+
+
+def has_history(df, anchor_ts, lookback):
+    if anchor_ts is None or df.empty:
+        return True
+    return len(df[df["date"] <= anchor_ts]) >= int(lookback)
 
 
 def fetch_cached(fetcher, symbol, start_ts, analysis_ts, period, label, anchor_ts=None):
@@ -288,35 +478,38 @@ def fetch_cached(fetcher, symbol, start_ts, analysis_ts, period, label, anchor_t
 
 def fetch_market_data(symbol, analysis_ts, years=3):
     start_ts = analysis_ts - pd.DateOffset(years=years + 1)
-    daily_df = fetch_cached(fetch_akshare_daily, symbol, start_ts, analysis_ts, "daily", "日线")
-    try:
-        weekly_df = fetch_cached(fetch_akshare_weekly, symbol, start_ts, analysis_ts, "weekly", "周线")
-    except Exception:
-        weekly_df = daily_to_weekly(daily_df)
-        weekly_df.to_csv(cache_path(symbol, start_ts, analysis_ts, "weekly"), index=False, encoding="utf-8-sig")
+    daily_df = load_local_daily(symbol, start_ts, analysis_ts)
+    weekly_df = daily_to_weekly(daily_df)
     return daily_df, weekly_df
 
 
-def trade_replay_payload(symbol, start_date, lookback=700):
+def trade_replay_payload(symbol, start_date, lookback=700, fresh=False):
     start_ts = parse_date(start_date)
-    fetch_start = start_ts - pd.DateOffset(years=4)
-    fetch_end = max(previous_trading_day(), start_ts + pd.DateOffset(years=2))
-    daily = fetch_cached(fetch_akshare_daily, symbol, fetch_start, fetch_end, "daily", "日线", anchor_ts=start_ts)
+    fetch_end = previous_trading_day()
+    daily = load_local_daily(symbol, None, fetch_end)
     daily = daily[daily["date"] <= fetch_end].copy().reset_index(drop=True)
     if daily.empty:
         raise ValueError(f"No daily data for {symbol}.")
     candidates = daily[daily["date"] <= start_ts]
     if candidates.empty:
         raise ValueError("Start date is earlier than available market data.")
+    available_history = len(candidates)
     cursor = int(candidates.index[-1])
-    window_start = max(0, cursor - int(lookback) + 1)
-    replay_daily = daily.iloc[window_start:].copy().reset_index(drop=True)
-    cursor = cursor - window_start
+    history_start = max(0, cursor - int(lookback) + 1)
+    history = daily.iloc[history_start:cursor + 1].copy()
+    future = daily.iloc[cursor + 1:].copy()
+    replay_daily = pd.concat([history, future], ignore_index=True)
+    cursor = len(history) - 1
     return {
         "symbol": symbol,
         "startDate": replay_daily.iloc[cursor]["date"].strftime("%Y-%m-%d"),
         "cursor": cursor,
         "position": None,
+        "requestedLookback": int(lookback),
+        "availableHistory": available_history,
+        "historyMode": "lookback" if available_history >= int(lookback) else "all_available",
+        "dataSource": "local_sqlite",
+        "fresh": False,
         "timeframes": {
             "daily": candles_to_records(replay_daily),
             "weekly": candles_to_records(daily_to_weekly(replay_daily)),
@@ -836,14 +1029,17 @@ def previous_trading_day(reference=None):
 
 
 def cached_symbols():
-    if not CACHE_DIR.exists():
-        return []
-    symbols = {
-        path.name.split("_", 1)[0]
-        for path in list(CACHE_DIR.glob("*_daily_*.csv")) + list(CACHE_DIR.glob("*_weekly_*.csv"))
-        if "_" in path.name
-    }
-    return sorted(symbol for symbol in symbols if symbol in RANDOM_SYMBOLS)
+    try:
+        return local_symbols()
+    except Exception:
+        if not CACHE_DIR.exists():
+            return []
+        symbols = {
+            path.name.split("_", 1)[0]
+            for path in CACHE_DIR.glob("*_daily_*.csv")
+            if "_" in path.name
+        }
+        return sorted(symbols)
 
 
 def cached_symbol_start_date(symbol):
@@ -871,11 +1067,23 @@ def cached_symbol_trade_dates(symbol, start_bound, end_bound):
     return sorted(set(dates))
 
 
+def cached_symbol_trade_dates_with_history(symbol, start_bound, end_bound, lookback=700):
+    dates = cached_symbol_trade_dates(symbol, pd.Timestamp.min, end_bound)
+    if not dates:
+        return []
+    eligible_start_index = min(max(int(lookback) - 1, 0), len(dates) - 1)
+    eligible = dates[eligible_start_index:]
+    return [date for date in eligible if date >= start_bound]
+
+
 def valid_random_replay_symbols(start_bound, end_bound):
     symbols = cached_symbols() or RANDOM_SYMBOLS
     valid = []
     for symbol in symbols:
-        dates = cached_symbol_trade_dates(symbol, start_bound, end_bound)
+        try:
+            dates = local_trade_dates(symbol, start_bound, end_bound)
+        except Exception:
+            dates = cached_symbol_trade_dates_with_history(symbol, start_bound, end_bound, lookback=700)
         if dates:
             valid.append((symbol, dates))
     return valid
@@ -886,6 +1094,9 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         super().end_headers()
 
     def do_OPTIONS(self):
@@ -894,6 +1105,12 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/search-stocks":
+            params = parse_qs(parsed.query)
+            query = (params.get("q") or [""])[0]
+            limit = int((params.get("limit") or ["20"])[0])
+            self.write_json(200, search_stock_names(query, limit=limit))
+            return
         if parsed.path == "/api/random-training-sample":
             self.write_json(200, self.random_training_sample())
             return
@@ -985,7 +1202,8 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
             if not start_date:
                 start_date = previous_trading_day().strftime("%Y-%m-%d")
             lookback = int(payload.get("lookback", 700))
-            self.write_json(200, trade_replay_payload(symbol, start_date, lookback=lookback))
+            fresh = bool(payload.get("fresh"))
+            self.write_json(200, trade_replay_payload(symbol, start_date, lookback=lookback, fresh=fresh))
         except Exception as exc:
             self.write_json(400, {"error": str(exc)})
 
@@ -1006,15 +1224,24 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
     def random_training_sample(self):
         start_bound = pd.Timestamp("2014-01-01")
         end = pd.Timestamp("2026-06-01")
-        candidates = valid_random_replay_symbols(start_bound, end)
-        if not candidates:
-            raise ValueError("没有可用于随机盲训的缓存行情，请先输入股票代码拉取一次数据。")
-        symbol, dates = random.choice(candidates)
-        random_day = random.choice(dates)
-        return {
-            "symbol": symbol,
-            "date": pd.Timestamp(random_day).strftime("%Y-%m-%d"),
-        }
+        symbols = local_symbols()
+        if not symbols:
+            raise ValueError("本地行情数据库没有可用于随机盲训的股票。")
+        random.shuffle(symbols)
+        for symbol in symbols[:80]:
+            dates = local_trade_dates(symbol, start_bound, end)
+            if not dates:
+                continue
+            if len(dates) >= 700:
+                dates = dates[699:]
+            random_day = random.choice(dates)
+            return {
+                "symbol": symbol,
+                "date": pd.Timestamp(random_day).strftime("%Y-%m-%d"),
+                "fresh": False,
+                "dataSource": "local_sqlite",
+            }
+        raise ValueError("本地行情数据库没有可用于随机盲训的行情。")
 
     def write_json(self, status, data):
         body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")

@@ -1,0 +1,171 @@
+{
+  "version": "0.2",
+  "source": {
+    "file": "trade_replay_samples.jsonl",
+    "datasetCount": 11,
+    "recordCount": 213,
+    "buyCount": 43,
+    "sellCount": 43,
+    "holdCount": 127
+  },
+  "principle": "规则库用于识别是否符合交易体系、缺少哪些确认条件、止损止盈依据是什么；不是用于回避所有失败交易。",
+  "stages": [
+    {
+      "id": "uptrend_pullback",
+      "label": "上升趋势回调",
+      "features": ["整体不再持续创新低", "回调后重新站回短期强势区", "压力突破后开始转支撑"],
+      "preferredModels": ["uptrend_continuation", "resistance_to_support_pullback", "platform_breakout"]
+    },
+    {
+      "id": "uptrend_deep_pullback",
+      "label": "上升趋势中的大调整",
+      "features": ["大趋势可能仍向上", "短期结构被破坏", "需要重新形成支撑或平台"],
+      "waitFor": ["低点不再下移", "回踩缩量", "突破交易密集区或颈线", "头肩底或双底"]
+    },
+    {
+      "id": "range",
+      "label": "横盘震荡",
+      "features": ["支撑压力反复验证", "价格围绕成交密集区运行"],
+      "preferredModels": ["support_validation", "support_reclaim", "range_breakout_pullback"]
+    },
+    {
+      "id": "downtrend_rebound",
+      "label": "下跌趋势或弱势结构",
+      "features": ["持续创新低或反弹无力", "支撑经常失效"],
+      "preferredModels": ["fast_drop_repair", "new_low_platform", "support_reclaim"],
+      "positioning": "只做反弹，不做趋势仓位"
+    }
+  ],
+  "levelRules": [
+    {
+      "id": "resistance_to_support",
+      "label": "压力转支撑",
+      "rule": "原本涨不上去的位置被有效突破后，可转为支撑，但必须等待回踩验证。"
+    },
+    {
+      "id": "volume_zone_edge",
+      "label": "成交密集区上下沿",
+      "rule": "成交密集区上沿突破后常成为支撑，上方成交密集区下沿或上沿可作为压力。"
+    },
+    {
+      "id": "multi_touch_high_low",
+      "label": "多次触碰高低点",
+      "rule": "近期高点多次触碰后容易形成压力，前期高点突破后回踩不破可转支撑。"
+    },
+    {
+      "id": "level_migration",
+      "label": "支撑压力迁移",
+      "rule": "新平台形成或原压力被验证后支撑上移；原支撑有效跌破且无法拉回则支撑下移。"
+    }
+  ],
+  "buyModels": [
+    {
+      "id": "support_validation",
+      "label": "支撑验证买入",
+      "required": ["接近关键支撑", "支撑未被有效跌破", "出现阳线、弱转强或重新上移迹象", "止损距离较小"],
+      "bonus": ["回踩缩量", "上方压力较远", "盈亏比客观", "支撑多次验证"],
+      "stopLoss": ["支撑下沿", "前期验证支撑最低点", "确认阳线实体下沿"],
+      "avoid": ["离支撑太远", "上方压力太近", "支撑刚失效尚未确认"]
+    },
+    {
+      "id": "support_reclaim",
+      "label": "跌破支撑后快速拉回",
+      "required": ["跌破关键支撑", "快速拉回支撑上方", "拉回后不再继续破位"],
+      "confirm": ["再次回踩支撑不破", "缩量", "阳线或弱转强"],
+      "stopLoss": ["拉回K线实体下沿", "震仓K线低点", "支撑下沿"],
+      "risk": "弱势结构中容易连续止损，需要降低预期。"
+    },
+    {
+      "id": "platform_breakout",
+      "label": "平台突破",
+      "required": ["形成新平台或成交密集区", "突破平台上沿", "突破后没有快速跌回平台"],
+      "confirm": ["突破后回踩不破"],
+      "stopLoss": ["新平台下沿", "突破K线实体下沿", "首次回踩低点"]
+    },
+    {
+      "id": "resistance_to_support_pullback",
+      "label": "压力转支撑后的回踩买入",
+      "required": ["原压力被突破", "回踩原压力区", "原压力区不再有效跌破", "价格重新向上"],
+      "confirm": ["回踩缩量", "低点不再下移", "支撑上方阳线或再次突破"],
+      "stopLoss": ["原压力转支撑区域下沿", "回踩确认K线下沿"]
+    },
+    {
+      "id": "fast_drop_repair",
+      "label": "急跌后快速修复",
+      "required": ["快速急跌", "快速收复", "出现小支撑或平台", "止损很近"],
+      "positioning": "反弹模型，不是趋势模型",
+      "stopLoss": ["急跌修复区域上沿", "小平台下沿", "修复阳线实体下沿"]
+    },
+    {
+      "id": "weak_to_strong",
+      "label": "弱转强/趋势扭转",
+      "required": ["弱势后不再创新低", "出现新高或站回交易密集区", "形成双底、头肩底或平台突破"],
+      "confirm": ["前低不破", "突破后回踩不破", "关键支撑上移"],
+      "risk": "单日强不等于结构扭转，失败时快速止损。"
+    }
+  ],
+  "holdRules": [
+    {
+      "id": "too_far_from_support",
+      "label": "离支撑太远不买",
+      "rule": "即使出现大阳线，如果距离支撑太远导致止损空间过大、盈亏比不足，也不追。"
+    },
+    {
+      "id": "wait_pullback_after_breakout",
+      "label": "突破后等待回踩",
+      "rule": "突破压力后等待压力转支撑的验证，回踩不破才提高优先级。"
+    },
+    {
+      "id": "watch_near_resistance",
+      "label": "压力附近先观察",
+      "rule": "接近前期压力、成交密集区上沿或近期高点时不追买，观察能否突破。"
+    },
+    {
+      "id": "wait_after_breakdown",
+      "label": "破位后等待重新踩稳",
+      "rule": "支撑跌破后若没有快速拉回，不做，等待新的支撑或新平台形成。"
+    }
+  ],
+  "sellRules": [
+    {
+      "id": "stop_loss_triggered",
+      "label": "止损触发",
+      "triggers": ["跌破支撑下沿", "跌破震仓K线低点", "跌破平台下沿", "跌破买入依据"],
+      "principle": "交易体系接受失败，触发后先离场。"
+    },
+    {
+      "id": "trend_changed",
+      "label": "趋势改变卖出",
+      "triggers": ["跌破5日线或10日线", "跌破跳空K线", "跌破大阳线实体下沿", "长上引线加大阴线"]
+    },
+    {
+      "id": "take_profit_near_resistance",
+      "label": "压力附近转弱止盈",
+      "triggers": ["到达前期压力", "快速上涨后放量阴线", "长上引线后大阴线", "触碰压力后无法突破"]
+    },
+    {
+      "id": "trailing_take_profit",
+      "label": "移动止盈",
+      "basis": ["前一根大阳线实体下沿", "跳空K线下沿", "5日线", "新平台下沿"]
+    }
+  ],
+  "riskReward": {
+    "normalTarget": "上方压力",
+    "normalStop": "买入依据对应K线或支撑下沿",
+    "minimumRatio": 3,
+    "exception": "长期趋势扭转或强趋势延续时，不只用最近压力做固定目标，可采用移动止盈。"
+  },
+  "scoring": {
+    "stageMatch": 20,
+    "levelReliability": 20,
+    "triggerCompleteness": 25,
+    "stopLossClarity": 15,
+    "riskReward": 20,
+    "decisionBands": [
+      {"min": 80, "label": "符合模型，可进入交易计划"},
+      {"min": 60, "label": "接近模型，继续等待确认"},
+      {"min": 40, "label": "有局部特征，但不完整"},
+      {"min": 0, "label": "不符合体系"}
+    ]
+  }
+}

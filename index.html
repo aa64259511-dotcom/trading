@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>交易思维训练</title>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=20260615-ai-feedback" />
   </head>
   <body>
     <main class="app-shell">
@@ -186,10 +186,12 @@
               </div>
 
               <div class="replay-fetch-row">
+                <label class="stock-search-label">股票名称/首字母 <input id="replayStockSearch" type="text" placeholder="如：赣锋锂业 / GFLY" autocomplete="off" /><div class="stock-search-results hidden" id="stockSearchResults"></div></label>
                 <label>股票代码 <input id="replaySymbol" type="text" value="002460" autocomplete="off" /><strong class="blind-value hidden" id="blindSymbol">已隐藏</strong></label>
                 <label>开始日期 <input id="replayDate" type="date" /><strong class="blind-value hidden" id="blindDate">已隐藏</strong></label>
                 <button class="primary-button" id="startReplay" type="button">开始训练</button>
                 <button class="secondary-button" id="startBlindReplay" type="button">随机盲训</button>
+                <button class="secondary-button write-toggle" id="replayWriteToggle" type="button" aria-pressed="true">真实训练</button>
                 <button class="secondary-button hidden" id="revealReplayIdentity" type="button">显示股票和日期</button>
               </div>
 
@@ -201,46 +203,77 @@
                 <div><span>累计收益率</span><strong id="replayTotalReturn">0.00%</strong></div>
               </div>
 
-              <div class="kline-card">
-                <div class="chart-tools" aria-label="支撑压力画线工具">
-                  <button class="secondary-button level-tool" id="drawLevelLine" type="button">画支撑压力线</button>
-                  <button class="secondary-button" id="clearLevelLines" type="button">清空线</button>
-                  <span id="activeLevelInfo">正常浏览：可拖动画布、上下键缩放</span>
-                </div>
-                <div class="selected-level-tools hidden" id="selectedLevelTools">
-                  <label>画线原因 <input id="selectedLevelReason" type="text" placeholder="说明这条线的依据" /></label>
-                  <button class="secondary-button" id="saveSelectedLevelReason" type="button">写入画线原因</button>
-                  <button class="secondary-button danger-button" id="deleteSelectedLevel" type="button">删除选中线</button>
-                </div>
-                <canvas id="replayChart" width="1280" height="560"></canvas>
-              </div>
+              <div class="replay-main-grid">
+                <div class="replay-chart-column">
+                  <div class="kline-card">
+                    <div class="chart-tools" aria-label="支撑压力画线工具">
+                      <button class="secondary-button" id="autoLevelLines" type="button">自动画线</button>
+                      <button class="secondary-button level-tool" id="drawLevelLine" type="button">画支撑压力线</button>
+                      <button class="secondary-button" id="clearLevelLines" type="button">清空线</button>
+                      <span id="activeLevelInfo">正常浏览：可拖动画布、上下键缩放</span>
+                    </div>
+                    <div class="selected-level-tools hidden" id="selectedLevelTools">
+                      <label>画线原因 <input id="selectedLevelReason" type="text" placeholder="说明这条线的依据" /></label>
+                      <button class="secondary-button" id="saveSelectedLevelReason" type="button">写入画线原因</button>
+                      <button class="secondary-button danger-button" id="deleteSelectedLevel" type="button">删除选中线</button>
+                    </div>
+                    <canvas id="replayChart" width="1280" height="560"></canvas>
+                  </div>
 
-              <div class="field-grid replay-structure-grid">
-                <label>趋势结构判断 <input id="replayStructure" type="text" placeholder="如：上升趋势中的大调整" /></label>
-              </div>
-
-              <div class="replay-write-row">
-                <button class="secondary-button write-toggle" id="replayWriteToggle" type="button" aria-pressed="false">测试模式：不写入训练数据</button>
-                <span>开启后，本次买入、卖出、观望才会保存到训练集。</span>
-              </div>
-
-              <div class="decision-actions">
-                <div class="decision-entry">
-                  <button class="primary-button" id="replayBuy" type="button">买入</button>
-                  <div class="buy-entry-fields">
-                    <label>买入理由 <textarea id="replayBuyReason" placeholder="点击买入前填写"></textarea></label>
-                    <label>止损价格 <input id="replayStopLoss" type="number" min="0" step="0.01" /></label>
-                    <label>止损原因 <textarea id="replayStopLossReason" placeholder="说明为什么把止损设在这里"></textarea></label>
+                  <div class="field-grid replay-structure-grid">
+                    <label>趋势结构判断 <input id="replayStructure" type="text" placeholder="如：上升趋势中的大调整" /></label>
                   </div>
                 </div>
-                <div class="decision-entry">
-                  <button class="secondary-button" id="replaySell" type="button" disabled>卖出</button>
-                  <label>卖出理由 <textarea id="replaySellReason" placeholder="点击卖出前填写"></textarea></label>
-                </div>
-                <div class="decision-entry">
-                  <button class="secondary-button" id="replayHold" type="button">观望</button>
-                  <label>备注 <textarea id="replayHoldNote" placeholder="记录这个交易日需要备注的信息"></textarea></label>
-                </div>
+
+                <aside class="replay-side-panel">
+                  <section class="rule-advice-panel" id="ruleAdvicePanel" aria-live="polite">
+                    <div class="rule-advice-header">
+                      <div>
+                        <h3>AI建议</h3>
+                        <p id="ruleAdviceStage">等待K线数据</p>
+                      </div>
+                      <span class="rule-advice-side" id="ruleAdviceSide">--</span>
+                      <strong id="ruleAdviceScore">--</strong>
+                    </div>
+                    <div class="rule-advice-body" id="ruleAdviceBody">开始训练后，根据AI建议识别当前是否接近交易模型。</div>
+                  </section>
+
+                  <section class="ai-feedback-panel" id="aiFeedbackPanel">
+                    <div class="ai-feedback-head">
+                      <strong>AI建议反馈</strong>
+                      <span>真实训练写入</span>
+                    </div>
+                    <div class="ai-feedback-toggle" role="group" aria-label="AI建议是否认可">
+                      <button class="secondary-button ai-feedback-button" id="aiAdviceAccept" type="button" data-ai-feedback="accepted">认可</button>
+                      <button class="secondary-button ai-feedback-button" id="aiAdviceReject" type="button" data-ai-feedback="rejected">不认可</button>
+                    </div>
+                    <label class="ai-disagree-reason hidden" id="aiDisagreeReasonWrap">不认可原因
+                      <textarea id="aiDisagreeReason" placeholder="说明不认可AI建议的原因"></textarea>
+                    </label>
+                  </section>
+
+                  <div class="decision-actions">
+                    <div class="decision-entry decision-buy-entry">
+                      <button class="primary-button" id="replayBuy" type="button">买入</button>
+                      <div class="buy-entry-fields">
+                        <label>买入理由 <textarea id="replayBuyReason" placeholder="点击买入前填写"></textarea></label>
+                        <label>止损价格 <input id="replayStopLoss" type="number" min="0" step="0.01" /></label>
+                        <label>止损原因 <textarea id="replayStopLossReason" placeholder="说明为什么把止损设在这里"></textarea></label>
+                      </div>
+                    </div>
+                    <div class="decision-entry decision-sell-entry hidden">
+                      <button class="secondary-button" id="replaySell" type="button" disabled>卖出</button>
+                      <label>卖出理由 <textarea id="replaySellReason" placeholder="点击卖出前填写"></textarea></label>
+                    </div>
+                    <div class="decision-entry">
+                      <button class="secondary-button" id="replayHold" type="button">观望</button>
+                      <label>备注 <textarea id="replayHoldNote" placeholder="记录这个交易日需要备注的信息"></textarea></label>
+                    </div>
+                  </div>
+
+                  <p class="training-status" id="replayStatus" role="status" aria-live="polite"></p>
+                  <div class="level-table" id="replayLog"></div>
+                </aside>
               </div>
 
               <div class="level-reason-grid hidden" aria-hidden="true">
@@ -249,9 +282,6 @@
                 <input id="replayResistance" type="number" min="0" step="0.01" readonly />
                 <textarea id="replayResistanceReason"></textarea>
               </div>
-
-              <p class="training-status" id="replayStatus" role="status" aria-live="polite"></p>
-              <div class="level-table" id="replayLog"></div>
 
             </form>
           </div>
@@ -273,6 +303,6 @@
       </section>
     </main>
 
-    <script src="app.js"></script>
+    <script src="app.js?v=20260615-ai-feedback"></script>
   </body>
 </html>
