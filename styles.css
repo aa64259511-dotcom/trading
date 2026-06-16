@@ -117,7 +117,7 @@ h3 {
 
 .mode-tabs {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   padding: 14px 28px;
   background: #edf1f5;
@@ -531,11 +531,15 @@ canvas {
 
 .rule-advice-panel {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
+  height: 390px;
+  min-height: 390px;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fff;
+  overflow: hidden;
 }
 
 .rule-advice-header {
@@ -562,6 +566,37 @@ canvas {
   font-size: 20px;
 }
 
+.rule-advice-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rule-copy-button {
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  cursor: pointer;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 900;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.rule-copy-button:hover {
+  color: #174d86;
+}
+
+.rule-copy-button:disabled {
+  cursor: not-allowed;
+  color: var(--muted);
+  opacity: 0.58;
+  text-decoration: none;
+}
+
 .rule-advice-side {
   justify-self: end;
   padding: 5px 9px;
@@ -583,7 +618,11 @@ canvas {
 .rule-advice-body {
   display: grid;
   grid-template-columns: 1fr;
+  align-content: start;
   gap: 10px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
   font-size: 13px;
   line-height: 1.45;
 }
@@ -1112,6 +1151,43 @@ canvas {
   white-space: nowrap;
 }
 
+
+.backtest-shell {
+  display: grid;
+  grid-template-columns: minmax(320px, 440px) minmax(0, 1fr);
+  gap: 0;
+}
+
+.backtest-view {
+  background: #fbfcfd;
+}
+
+.backtest-form {
+  min-height: 560px;
+}
+
+.backtest-result {
+  min-height: 560px;
+}
+
+.backtest-metrics {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.backtest-trade-row {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr) 104px;
+  gap: 10px;
+  align-items: start;
+}
+
+.backtest-trade-row small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
 .dataset-manager {
   margin-top: 18px;
   padding: 14px;
@@ -1133,9 +1209,15 @@ canvas {
 
 .dataset-header {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 112px;
+  grid-template-columns: minmax(0, 1fr) minmax(240px, 320px);
   gap: 12px;
   align-items: center;
+}
+
+.dataset-header-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
 }
 
 .dataset-header h3 {
@@ -1152,6 +1234,42 @@ canvas {
 .dataset-header .secondary-button,
 .dataset-actions .secondary-button {
   margin-top: 0;
+}
+
+.timing-quality-panel {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  overflow-x: auto;
+}
+
+.timing-quality-panel table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 920px;
+}
+
+.timing-quality-panel th,
+.timing-quality-panel td {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  font-size: 13px;
+}
+
+.timing-quality-panel th {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.timing-quality-panel .decision {
+  display: inline-block;
+  margin-top: 0;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-weight: 900;
 }
 
 .dataset-list {
@@ -1289,6 +1407,15 @@ canvas {
     max-height: none;
     overflow: visible;
     padding-right: 0;
+  }
+
+  .rule-advice-actions {
+    justify-content: flex-start;
+  }
+
+  .rule-advice-panel {
+    height: 340px;
+    min-height: 340px;
   }
 
   .analysis-form,

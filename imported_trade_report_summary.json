@@ -1,0 +1,40 @@
+{
+    "generatedAt":  "2026-06-16T10:39:56",
+    "source":  "baozhu_xls_import",
+    "output":  "C:\\Users\\admin\\Documents\\trading advice\\imported_trade_report_samples.jsonl",
+    "files":  [
+                  {
+                      "file":  "训练数据报告_20260611_190254.xls",
+                      "rows":  3087,
+                      "datasets":  713,
+                      "imported":  1219,
+                      "duplicates":  0,
+                      "skippedBefore2010":  132,
+                      "skippedInvalid":  0,
+                      "buy":  640,
+                      "sell":  579,
+                      "datasetsWithImportedOps":  283
+                  },
+                  {
+                      "file":  "训练数据报告_20260611_190624.xls",
+                      "rows":  27148,
+                      "datasets":  5276,
+                      "imported":  12509,
+                      "duplicates":  152,
+                      "skippedBefore2010":  671,
+                      "skippedInvalid":  0,
+                      "buy":  6474,
+                      "sell":  6035,
+                      "datasetsWithImportedOps":  3088
+                  }
+              ],
+    "combined":  {
+                     "imported":  13728,
+                     "duplicates":  152,
+                     "skippedBefore2010":  803,
+                     "skippedInvalid":  0,
+                     "buy":  7114,
+                     "sell":  6614,
+                     "datasetsWithImportedOps":  3371
+                 }
+}

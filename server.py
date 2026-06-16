@@ -10,7 +10,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
-import requests
+
+try:
+    import requests
+except ImportError:
+    requests = None
 
 from support_resistance_trainer import analyze, fetch_akshare_daily, fetch_akshare_weekly, load_csv, parse_date
 
@@ -44,6 +48,7 @@ RANDOM_SYMBOL_LISTING_DATES = {
 CACHE_DIR = Path("data_cache")
 MARKET_DB = Path("market_data.sqlite")
 TRADE_REPLAY_DATASET = Path("trade_replay_samples.jsonl")
+LEVEL_TRAINING_DATASET = Path("level_training_samples.jsonl")
 STOCK_NAME_INDEX = Path("stock_names.json")
 MARKET_HISTORY_START = pd.Timestamp("1990-01-01")
 PROXY_ENV_KEYS = (
@@ -118,6 +123,8 @@ def market_symbol(symbol):
 
 
 def fetch_tencent_daily(symbol, start_ts, analysis_ts):
+    if requests is None:
+        raise RuntimeError("requests is not installed; Tencent fallback data source is unavailable.")
     session = requests.Session()
     session.trust_env = False
     response = session.get(
@@ -152,6 +159,8 @@ def fetch_tencent_daily(symbol, start_ts, analysis_ts):
 
 
 def fetch_eastmoney_daily(symbol, start_ts, analysis_ts, attempts=3):
+    if requests is None:
+        raise RuntimeError("requests is not installed; Eastmoney fallback data source is unavailable.")
     last_error = None
     response = None
     success = False
@@ -526,6 +535,14 @@ def save_trade_replay_decision(payload):
     return {"saved": True, "path": str(TRADE_REPLAY_DATASET)}
 
 
+def save_level_training_sample(payload):
+    record = dict(payload)
+    record["savedAt"] = pd.Timestamp.now().isoformat()
+    with LEVEL_TRAINING_DATASET.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return {"saved": True, "path": str(LEVEL_TRAINING_DATASET)}
+
+
 def read_trade_replay_records():
     records = []
     if not TRADE_REPLAY_DATASET.exists():
@@ -573,6 +590,160 @@ def trade_replay_datasets():
     datasets = list(groups.values())
     datasets.sort(key=lambda item: item.get("savedAt") or "", reverse=True)
     return {"datasets": datasets, "count": len(datasets), "recordCount": len(records)}
+
+
+def safe_number(value, default=None):
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def pct_change(next_price, base_price):
+    if next_price is None or not base_price:
+        return None
+    return (float(next_price) / float(base_price) - 1) * 100
+
+
+def close_return_at(future_df, entry_price, offset):
+    if len(future_df) <= offset or entry_price <= 0:
+        return None
+    return round(pct_change(future_df.iloc[offset]["close"], entry_price), 2)
+
+
+def classify_timing(item):
+    if item.get("stopLoss") is None or item.get("stopLoss") <= 0:
+        return "missing_stop", "缺少止损，无法判断买点是否可执行"
+    if item.get("stopLoss") >= item.get("entryPrice"):
+        return "invalid_stop", "止损不低于买入价，训练样本需要修正止损"
+    if item.get("hitStop20") and (item.get("r20") or 0) > 3:
+        return "early_or_tight_stop", "20日后方向仍向上，但先触发止损，偏买早或止损过紧"
+    if item.get("hitStop20") and (item.get("mfe20") or 0) >= 8:
+        return "early_or_tight_stop", "后续给过较大浮盈，但先触发止损，偏买早或止损过紧"
+    if item.get("hitStop20"):
+        return "bad_timing", "20日内先触发止损，择时失败概率高"
+    if (item.get("r10") or 0) < -3 and (item.get("mfe20") or 0) < 5:
+        return "weak_follow_through", "买入后10日仍弱，且后续浮盈不足，延续性不够"
+    if (item.get("mae20") or 0) <= -8 and (item.get("mfe20") or 0) >= 8:
+        return "wide_swing", "方向有机会但波动过大，需要更好的确认或更宽止损"
+    if (item.get("r10") or 0) > 0 and (item.get("mfeR") or 0) >= 2:
+        return "good_timing", "买入后较快给出正反馈，并至少接近2R浮盈"
+    return "neutral_timing", "结果中性，需要结合形态复盘买点是否可优化"
+
+
+def trade_replay_timing_quality():
+    records = read_trade_replay_records()
+    buys = [record for record in records if record.get("action") == "buy"]
+    if not buys:
+        return {"summary": {"buyCount": 0}, "items": [], "qualityCounts": {}}
+
+    by_symbol = {}
+    for record in buys:
+        symbol = str(record.get("symbol") or "").strip().zfill(6)
+        if not symbol:
+            continue
+        by_symbol.setdefault(symbol, []).append(record)
+
+    dataframes = {}
+    errors = []
+    for symbol, symbol_records in by_symbol.items():
+        dates = [parse_date(record.get("date")) for record in symbol_records if record.get("date")]
+        if not dates:
+            continue
+        start_ts = min(dates) - pd.DateOffset(days=260)
+        end_ts = max(dates) + pd.DateOffset(days=120)
+        try:
+            dataframes[symbol] = load_local_daily(symbol, start_ts, end_ts)
+        except Exception as exc:
+            errors.append({"symbol": symbol, "error": str(exc)})
+
+    items = []
+    for record in buys:
+        symbol = str(record.get("symbol") or "").strip().zfill(6)
+        df = dataframes.get(symbol)
+        entry_price = safe_number(record.get("price"), 0)
+        if df is None or df.empty or entry_price <= 0 or not record.get("date"):
+            continue
+        entry_ts = parse_date(record.get("date"))
+        matches = df.index[df["date"] >= entry_ts].tolist()
+        if not matches:
+            continue
+        start_index = int(matches[0])
+        future = df.iloc[start_index:start_index + 21].copy()
+        if len(future) < 2:
+            continue
+        stop_loss = safe_number(record.get("stopLoss"))
+        high20 = float(future["high"].max())
+        low20 = float(future["low"].min())
+        risk = entry_price - stop_loss if stop_loss is not None else None
+        mfe = pct_change(high20, entry_price)
+        mae = pct_change(low20, entry_price)
+        item = {
+            "symbol": symbol,
+            "date": record.get("date"),
+            "entryPrice": round(entry_price, 3),
+            "stopLoss": round(stop_loss, 3) if stop_loss is not None else None,
+            "stopPct": round((stop_loss / entry_price - 1) * 100, 2) if stop_loss and entry_price else None,
+            "r5": close_return_at(future, entry_price, 5),
+            "r10": close_return_at(future, entry_price, 10),
+            "r20": close_return_at(future, entry_price, 20),
+            "mfe20": round(mfe, 2) if mfe is not None else None,
+            "mae20": round(mae, 2) if mae is not None else None,
+            "mfeR": round((high20 - entry_price) / risk, 2) if risk and risk > 0 else None,
+            "maeR": round((low20 - entry_price) / risk, 2) if risk and risk > 0 else None,
+            "hitStop20": bool(stop_loss and (future["low"] <= stop_loss).any()),
+            "model": record.get("aiAdviceModel") or "人工记录",
+            "reason": record.get("reason") or record.get("note") or "",
+        }
+        quality, quality_reason = classify_timing(item)
+        item["quality"] = quality
+        item["qualityReason"] = quality_reason
+        items.append(item)
+
+    quality_counts = {}
+    for item in items:
+        quality_counts[item["quality"]] = quality_counts.get(item["quality"], 0) + 1
+
+    def avg(values):
+        values = [value for value in values if value is not None]
+        return round(sum(values) / len(values), 2) if values else None
+
+    evaluated = len(items)
+    hit_stop = sum(1 for item in items if item.get("hitStop20"))
+    positive_r10 = sum(1 for item in items if item.get("r10") is not None and item["r10"] > 0)
+    positive_r20 = sum(1 for item in items if item.get("r20") is not None and item["r20"] > 0)
+    summary = {
+        "buyCount": len(buys),
+        "evaluatedBuyCount": evaluated,
+        "hitStop20Count": hit_stop,
+        "hitStop20Rate": round(hit_stop / evaluated * 100, 1) if evaluated else None,
+        "positiveR10Rate": round(positive_r10 / evaluated * 100, 1) if evaluated else None,
+        "positiveR20Rate": round(positive_r20 / evaluated * 100, 1) if evaluated else None,
+        "avgR5": avg([item.get("r5") for item in items]),
+        "avgR10": avg([item.get("r10") for item in items]),
+        "avgR20": avg([item.get("r20") for item in items]),
+        "avgMfe20": avg([item.get("mfe20") for item in items]),
+        "avgMae20": avg([item.get("mae20") for item in items]),
+    }
+    severity = {
+        "invalid_stop": 0,
+        "missing_stop": 1,
+        "bad_timing": 2,
+        "early_or_tight_stop": 3,
+        "wide_swing": 4,
+        "weak_follow_through": 5,
+        "neutral_timing": 6,
+        "good_timing": 7,
+    }
+    items.sort(key=lambda item: (severity.get(item["quality"], 9), item.get("r10") if item.get("r10") is not None else 999))
+    return {
+        "summary": summary,
+        "qualityCounts": quality_counts,
+        "items": items[:120],
+        "errors": errors,
+    }
 
 
 def delete_trade_replay_record(record_id=None, session_id=None):
@@ -1089,6 +1260,41 @@ def valid_random_replay_symbols(start_bound, end_bound):
     return valid
 
 
+def random_local_training_sample(start_bound, end_bound, min_history=700, symbol_attempts=80):
+    start_text = pd.Timestamp(start_bound).strftime("%Y-%m-%d")
+    end_text = pd.Timestamp(end_bound).strftime("%Y-%m-%d")
+    with market_db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT symbol
+            FROM daily_prices
+            WHERE trade_date <= ?
+            GROUP BY symbol
+            ORDER BY RANDOM()
+            LIMIT ?
+            """,
+            (end_text, int(symbol_attempts)),
+        ).fetchall()
+        for row in rows:
+            symbol = row["symbol"]
+            dates = conn.execute(
+                """
+                SELECT trade_date
+                FROM daily_prices
+                WHERE symbol = ? AND trade_date >= ? AND trade_date <= ?
+                ORDER BY trade_date
+                """,
+                (symbol, start_text, end_text),
+            ).fetchall()
+            date_values = [item["trade_date"] for item in dates]
+            if not date_values:
+                continue
+            if len(date_values) >= int(min_history):
+                date_values = date_values[int(min_history) - 1:]
+            return symbol, random.choice(date_values)
+    return None, None
+
+
 class TradingAdviceHandler(SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -1120,6 +1326,9 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/trade-replay-datasets":
             self.write_json(200, trade_replay_datasets())
             return
+        if parsed.path == "/api/trade-replay-timing-quality":
+            self.write_json(200, trade_replay_timing_quality())
+            return
         super().do_GET()
 
     def do_POST(self):
@@ -1135,6 +1344,9 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/trade-replay-decision":
             self.handle_trade_replay_decision()
+            return
+        if parsed.path == "/api/level-training-sample":
+            self.handle_level_training_sample()
             return
         if parsed.path == "/api/delete-trade-replay-record":
             self.handle_delete_trade_replay_record()
@@ -1214,6 +1426,13 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
         except Exception as exc:
             self.write_json(400, {"error": str(exc)})
 
+    def handle_level_training_sample(self):
+        try:
+            payload = self.read_json_payload()
+            self.write_json(200, save_level_training_sample(payload))
+        except Exception as exc:
+            self.write_json(400, {"error": str(exc)})
+
     def handle_delete_trade_replay_record(self):
         try:
             payload = self.read_json_payload()
@@ -1222,8 +1441,19 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
             self.write_json(400, {"error": str(exc)})
 
     def random_training_sample(self):
-        start_bound = pd.Timestamp("2014-01-01")
-        end = pd.Timestamp("2026-06-01")
+        start_bound = pd.Timestamp("2010-01-01")
+        one_year_ago = pd.Timestamp.now().normalize() - pd.DateOffset(years=1)
+        end = min(pd.Timestamp("2026-06-01"), one_year_ago)
+        if end < start_bound:
+            raise ValueError("随机盲训没有满足距离当前日期1年以上的可用日期。")
+        symbol, random_day = random_local_training_sample(start_bound, end)
+        if symbol and random_day:
+            return {
+                "symbol": symbol,
+                "date": pd.Timestamp(random_day).strftime("%Y-%m-%d"),
+                "fresh": False,
+                "dataSource": "local_sqlite",
+            }
         symbols = local_symbols()
         if not symbols:
             raise ValueError("本地行情数据库没有可用于随机盲训的股票。")
@@ -1247,6 +1477,7 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
         body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
