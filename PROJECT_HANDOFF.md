@@ -1,28 +1,29 @@
-﻿# 交易思维训练项目交接说明
+﻿# 交易思维训练项目交接文档
 
-更新时间：2026-06-15
+更新时间：2026-06-17
 项目目录：C:\Users\admin\Documents\trading advice
+本次交接重点：AI 建议/规则库、AI 回测流程、通达信行情导入、港股/期货独立行情表。
 
-## 1. 项目目标
+## 1. 当前项目目标
 
-本项目用于训练和沉淀一套人工交易思维，而不是单纯追求历史胜率。核心流程是：
+本项目用于训练和沉淀人工交易规则，并用规则库生成 AI 操作建议。核心流程是：
 
-- 输入或随机抽取 A 股股票代码和历史日期。
-- 从该日期之前读取最多 700 根日 K 线。
-- 在 K 线图上进行盲训、画支撑压力线、记录买入/卖出/观望操作。
-- 收集人工决策理由、止损依据、备注、AI 建议是否认可、不认可原因。
-- 后续根据训练集提炼规则库，用规则库给新行情生成 AI 建议。
+- 输入或盲选股票与历史日期。
+- 在 K 线图上手动画支撑压力线，或使用自动画线辅助。
+- 记录买入、卖出、观望、止损、止盈、保本止损等训练样本。
+- 将用户纠正过的样本沉淀到规则库。
+- 使用规则库给当前行情生成 AI 建议，并支持 AI 建议回测。
 
-当前页面名称为：`交易思维训练`。
+训练方向已调整：不是盲目增加执行 AI 建议的数据，而是重点收集“AI 与人工判断不一致、支撑压力需要修正、买卖点需要修正”的样本。
 
-## 2. 当前运行方式
+## 2. 运行方式
 
 服务端入口：`server.py`
 
-默认启动地址：
+推荐启动命令：
 
 ```powershell
-python server.py
+C:\Users\admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe server.py
 ```
 
 浏览器访问：
@@ -31,318 +32,164 @@ python server.py
 http://127.0.0.1:8765/
 ```
 
-如果使用 Codex 自带 Python，之前环境里可用的路径类似：
-
-```powershell
-C:\Users\admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe server.py
-```
-
-服务端监听端口：`8765`。
-
 ## 3. 关键文件
 
 - `index.html`：页面结构。
 - `styles.css`：页面样式。
-- `app.js`：主要前端逻辑，包括 K 线画布、训练交互、AI 建议、训练集管理。
-- `server.py`：本地 HTTP API，读取行情数据库、保存训练记录、管理训练集。
-- `market_data.sqlite`：本地 A 股行情数据库，体积较大，当前约 3.8GB。
-- `trade_replay_samples.jsonl`：训练记录数据集，重要数据文件，不要随意删除。
+- `app.js`：前端主逻辑，包含 K 线画布、训练交互、AI 建议、AI 回测、复制摘要、执行 AI 建议。
+- `server.py`：本地 HTTP API，读取行情数据库、保存训练记录、生成 AI 建议。
+- `market_data.sqlite`：本地行情数据库，已被 `.gitignore` 忽略，不提交到 Git。
+- `trade_replay_samples.jsonl`：交易训练样本。
+- `level_training_samples.jsonl`：阶段/级别训练样本。
 - `trading_rule_library.json`：结构化规则库。
-- `trading_rule_library.md`：规则库说明文档。
-- `stock_names.json`：股票名称/拼音首字母索引，用于股票搜索。
-- `import_market_data.py`：导入本地行情文件到 SQLite 的脚本。
-- `update_stock_names.py`：更新股票名称索引脚本。
-- `support_resistance_trainer.py`：早期支撑压力训练/分析逻辑。
-- `requirements.txt`：Python 依赖。
-
-## 4. 数据源状态
-
-当前行情数据源已经切换为本地 SQLite：
-
-```text
-market_data.sqlite
-```
-
-服务端读取逻辑在 `server.py` 中：
-
-- `MARKET_DB = Path("market_data.sqlite")`
-- `/api/trade-replay` 从本地数据库读取回放 K 线。
-- `/api/random-training-sample` 从本地行情库随机抽样。
-- 返回数据包含日线、周线、月线。
-
-用户之前明确表示“不需要缓存数据”，因为缓存样本可能重复训练。目前重点应使用本地数据库随机取样。
-
-## 5. 训练模式与交互
-
-当前主功能是“交易思维训练”：
-
-- 支持输入股票代码、股票名称或拼音首字母搜索。
-- 支持开始普通训练。
-- 支持随机盲训：随机股票、随机日期，默认隐藏股票代码和日期。
-- 随机盲训日期范围要求：从 `2010-01-01` 开始，结束日期必须距离当前日期至少 1 年；同时不晚于 `2026-06-01`。
-- 开始训练或随机盲训后，会默认自动画出当前价格上下最近两条支撑压力线。
-- K 线图支持日线、周线、月线切换。
-- 训练窗口目标是最多 700 根日 K 线；如果不足 700 根，则读取此前全部可用 K 线。
-
-## 6. K 线画布功能
-
-当前画布功能包括：
-
-- K 线展示。
-- 成交量展示。
-- MACD 展示。
-- MA5、MA10 展示。
-- 十字光标。
-- 光标纵坐标价格显示在左侧。
-- 左上角气泡显示当前 K 线日期、开高低收、涨跌幅、光标价格。
-- 盲选隐藏模式下，左上角气泡也隐藏日期。
-- 鼠标左右拖动画布可以移动历史窗口。
-- 键盘上下键缩放 K 线数量。
-- 支撑压力线可以在画布上点击添加。
-- 默认不是画线模式；点击“画支撑压力线”后画一条线，画完自动退出画线模式。
-- 支撑/压力不需要手动区分，由当前价格上方/下方自动判断。
-- 支撑压力线可以点击选中、拖动调整、删除、写入画线原因。
-- 自动画线一次只补齐当前价格上下最近两条，不删除已有线。
-- 突破或跌破后可再次点击自动画线补齐新线。
-
-最近刚做的改动：
-
-- 移动、添加、删除、清空支撑压力线后，会立即根据最新最近上下两条线重新计算右侧 `AI建议`。
-- 改变支撑压力价格时，会清空旧的 AI 认可/不认可反馈，避免旧反馈对应旧价格。
-- 单纯选中线、取消选中线、写入画线原因时，会刷新显示但保留 AI 反馈选择。
-
-## 7. 买入/卖出/观望交互
-
-右侧操作区根据是否持仓动态显示：
-
-- 空仓：显示买入相关操作，不显示卖出相关操作。
-- 持仓：显示卖出相关操作，不显示买入相关操作。
-- 观望始终可用。
-
-买入时需要填写：
-
-- 买入理由。
-- 止损价格。
-- 设置止损价格的原因。
-
-卖出时需要填写：
-
-- 卖出理由。
-
-观望时：
-
-- 可填写备注。
-- 备注为空时，不写入训练集，也不在图中显示观望标记。
-- 有备注时，才显示在训练记录与画布标记中。
-
-单次训练收益：
-
-- 买入按当日收盘价。
-- 卖出按当日收盘价。
-- 同一次训练内多笔交易按复利累计收益率。
-- 重新开始训练时累计收益率重置。
-
-## 8. 真实训练/测试训练
-
-页面有真实训练/测试训练切换按钮，位于开始随机盲训按钮后面。
-
-- 默认模式：真实训练。
-- 真实训练：满足写入条件时保存到 `trade_replay_samples.jsonl`。
-- 测试训练：页面推进但不写入训练集。
-
-另外，训练写入目前要求选择 AI 建议反馈：
-
-- 认可。
-- 不认可。
-- 如果不认可，必须填写不认可原因。
-
-## 9. AI 建议功能
-
-右侧模块名称为：`AI建议`。
-
-AI 建议会区分：
-
-- 当前是买入观察还是卖出管理。
-- 当前阶段标签。
-- 匹配模型。
-- 操作建议：买入、卖出、观望、继续持有。
-- 匹配度评分。
-- 符合特征。
-- 缺少确认。
-- 交易计划。
-
-用户期望的输出维度示例：
-
-```text
-当前阶段：长期下跌后尝试趋势扭转
-
-匹配模型：
-跌破支撑后快速拉回模型，匹配度 82 分
-
-符合特征：
-1. 跌破关键支撑后快速收回
-2. 回到支撑上方
-3. 止损距离较小
-
-缺少确认：
-还需要再次回踩支撑不破，或出现缩量企稳
-
-交易计划：
-若下一根K线站稳支撑上方，可考虑买入
-止损放在拉回K线实体下沿
-若上方压力空间不足，放弃
-```
-
-当前 AI 建议会读取画布上最近的上下两条支撑压力线参与判断。
-
-## 10. AI 建议反馈
-
-最近新增：`AI建议反馈`。
-
-每次真实训练写入前，需要选择：
-
-- 认可 AI 建议。
-- 不认可 AI 建议。
-
-如果不认可，需要填写原因。
-
-保存到训练记录中的字段包括：
-
-- `aiAdviceAction`
-- `aiAdviceText`
-- `aiAdviceScore`
-- `aiAdviceModel`
-- `aiAdviceStage`
-- `aiAdviceSide`
-- `aiAdviceAccepted`
-- `aiAdviceDisagreeReason`
-- `aiAdviceSnapshot`
-
-这些字段用于后续校正规则库：AI 哪里判断对、哪里偏离用户交易思维。
-
-## 11. 训练集管理
-
-项目已有训练集管理模块：
-
-- 一次训练的数据整合为一个训练集。
-- 训练集显示股票代码和累计收益率。
-- 默认收起具体操作。
-- 点击可展开查看全部操作记录。
-- 可复现某个训练集。
-- 可删除训练集。
-
-复现训练集时：
-
-- 自动回到最后一条训练数据对应的状态。
-- 恢复累计收益率。
-- 恢复当前是否持仓。
-
-展开记录时，目前会显示：
-
-- 操作日期。
-- 买入/卖出/观望。
-- 理由/备注。
-- 止损价格。
-- 支撑压力。
-- AI 建议和 AI 反馈。
-
-## 12. 当前规则库方向
-
-项目目标不是让模型回避所有失败交易，而是学习并程序化用户自己的交易体系。
-
-当前规则库重点：
-
-- 长期下跌后尝试趋势扭转。
-- 上升趋势中的大调整，等待踩稳确认。
-- 急跌后初步拉回，等待平台/支撑确认。
-- 跌破支撑后快速拉回模型。
-- 支撑附近假跌破、下引线或几天内拉回。
-- 支撑验证不破，缩量企稳。
-- 突破交易密集区。
-- 超跌反弹模型。
-- 卖出/止盈风险模型，如接近压力、上引线、大阴线、跌破 5 日线等。
-
-规则库文件：
-
-- `trading_rule_library.json`
-- `trading_rule_library.md`
-
-## 13. 当前 Git 状态提醒
-
-生成本说明时，工作区还有未提交改动。包括但不限于：
-
-- `.gitignore`
-- `app.js`
-- `index.html`
-- `server.py`
-- `styles.css`
-- `trade_replay_samples.jsonl`
-- `import_market_data.py`
-- `stock_names.json`
-- `trading_rule_library.json`
-- `trading_rule_library.md`
-- `update_stock_names.py`
-
-切换账号/设备前，建议先提交：
+- `trading_rule_library.md`：规则库说明。
+- `PROJECT_HANDOFF.md`：当前交接文档。
+
+新增/更新的数据导入脚本：
+
+- `import_tdx_day.py`：通达信 `.day` 日线导入脚本，支持 A 股、港股、期货/扩展市场。
+- `qmt_market_update.py`：QMT 外部行情更新方案，因 QMT 内置 Python 缺依赖未作为主流程。
+- `qmt_builtin_market_update.py`：QMT 内置 Python 方案，受 `pandas/sqlite3` 缺失限制。
+- `qmt_builtin_export_csv.py`：QMT 内置导出 CSV 方案。
+- `qmt_csv_import.py`：将 QMT CSV 导入 SQLite。
+- `qmt_symbols.txt`：QMT 导出使用的股票代码列表。
+
+## 4. 本地行情数据库状态
+
+数据库文件：`market_data.sqlite`
+
+该文件体积较大，当前不提交 Git。当前已验证：
+
+- A 股表：`daily_prices`
+  - 最新日期：`2026-06-16`
+  - 股票数量：约 `5896`
+  - 行数：约 `18063062`
+- 港股表：`hk_daily_prices`
+  - 来源：`C:\D\TDX\vipdoc\ds\lday` 中 `31#*.day`
+  - 最新日期：`2026-06-17`
+  - 港股数量：`2516`
+  - 行数：`2159789`
+- 期货/扩展市场表：`futures_daily_prices`
+  - 来源：`C:\D\TDX\vipdoc\ds\lday`
+  - 最新日期：`2026-06-17`
+  - 注意：之前全量导入过 `ds`，其中仍包含 `31#` 港股重复数据；如果后续要清理，可删除 `futures_daily_prices` 中 `raw_code like '31#%'`。
+
+验证数据库可用命令示例：
 
 ```powershell
-git status
-git add .
-git commit -m "Update trading replay training workflow"
+C:\Users\admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -c "import sqlite3; conn=sqlite3.connect('market_data.sqlite'); print(conn.execute('select max(trade_date), count(*) from daily_prices').fetchone()); print(conn.execute('select max(trade_date), count(*) from hk_daily_prices').fetchone()); print(conn.execute('select max(trade_date), count(*) from futures_daily_prices').fetchone()); conn.close()"
 ```
 
-注意：`market_data.sqlite` 很大，通常不建议提交到普通 Git 仓库，除非仓库明确使用 Git LFS 或只在本地管理。
+## 5. 通达信数据导入
 
-## 14. 新账号/新设备继续工作的步骤
-
-1. 获取项目目录或 Git 仓库。
-2. 确认 `market_data.sqlite` 存在于项目根目录。
-3. 确认 `trade_replay_samples.jsonl` 已同步，这是训练集核心数据。
-4. 安装 Python 依赖：
-
-```powershell
-pip install -r requirements.txt
-```
-
-5. 启动服务：
-
-```powershell
-python server.py
-```
-
-6. 打开浏览器：
+通达信根目录：
 
 ```text
-http://127.0.0.1:8765/
+C:\D\TDX\vipdoc
 ```
 
-7. 继续训练或进入训练集管理复现已有样本。
+A 股导入：
 
-## 15. 后续建议优化方向
+```powershell
+C:\Users\admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe import_tdx_day.py --tdx-root "C:\D\TDX\vipdoc" --markets sh,sz,bj
+```
 
-优先级较高：
+港股导入：
 
-- 继续收集真实训练数据，尤其是 AI 不认可原因。
-- 在规则库中统计“AI 建议被认可/不认可”的模式，提炼规则修正项。
-- 让 AI 建议明确引用当前生效支撑/压力线以及原因。
-- 在训练集管理中增加筛选：买入、卖出、观望、有备注、不认可 AI。
-- 对每条训练数据增加“体系内模型标签”，比如跌破拉回、平台突破、超跌反弹、趋势大调整。
+```powershell
+C:\Users\admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe import_tdx_day.py --tdx-root "C:\D\TDX\vipdoc" --markets ds --raw-prefix "31#"
+```
 
-长期方向：
+期货/扩展市场导入：
 
-- 训练集不是直接微调 GPT，而是先形成结构化规则库。
-- 通过人工标注数据总结可程序化规则。
-- 当规则稳定后，再考虑用模型做“规则解释/相似案例检索/计划生成”。
-- 胜率不是第一目标，关键是让系统越来越接近用户的交易思维。
+```powershell
+C:\Users\admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe import_tdx_day.py --tdx-root "C:\D\TDX\vipdoc" --markets ds
+```
 
-## 16. 给下一个 Codex 的提示词
+重要说明：
 
-可以把下面这段发给新账号里的 Codex：
+- A 股 `.day` 价格字段是整数，需要除以 100。
+- `ds` 扩展市场 `.day` 价格字段是 float，不能按 A 股方式除以 100。
+- `31#` 基本判断为港股，脚本已自动把 `31#` 逻辑市场识别为 `hk`，写入 `hk_daily_prices`。
+- `ds` 目录还包含外汇、期货、扩展市场等，不一定全是期货，后续如要精准分类需要增加前缀识别规则。
+
+## 6. AI 建议与 UI 状态
+
+已完成的前端/AI 建议改动：
+
+- AI 建议标题、操作建议、复制摘要、打分区域固定在页面顶部，不随内容滚动。
+- 分数旁边删除“买入观察”。
+- 复制摘要为文字链样式，不是按钮框。
+- 增加“执行AI建议”按钮，点击后把 AI 建议填入操作区。
+- 操作建议增加 UI 强调。
+- 买入时止损理由不再强制填写。
+- AI 建议乱码问题已处理过，后续改文件时注意 UTF-8 编码。
+
+AI 建议摘要包含：日期、股票代码、支撑、压力、操作建议、当前阶段、匹配模型、匹配度。
+
+## 7. AI 回测状态
+
+AI 策略回测已调整为接近交易训练：
+
+- 开始回测时出现与交易训练类似的画布。
+- 支持手动画支撑压力线和自动画线。
+- 当回测数据超出支撑压力范围时，需要继续补充支撑压力。
+- 页面操作重点保留“执行 AI 建议”和“下一日”。
+- 原来的手动买入/卖出操作区在 AI 回测中弱化，主要按 AI 建议执行。
+- 支持盲选回测，逻辑接近交易训练盲选。
+- AI 买入建议可直接执行，持仓后止损优先。
+
+## 8. 规则库关键原则
+
+规则库文件：`trading_rule_library.json`、`trading_rule_library.md`
+
+当前已经沉淀的重要规则：
+
+- 低于 5 日线时，不建议买入。
+- 买入需要小趋势向上。
+- 跌破拉回不能只是回到支撑上方一点点，需要拉出一定空间。
+- 跌破拉回后多数情况需要等待回踩确认，不是直接买入。
+- 突破密集交易区后，回踩确认再出现小阳线，且回踩尽量缩量，可以作为买点。
+- 急跌后可以博弈修复，但需要上方压力足够远，且盈亏比可接受。
+- 突破压力后，压力自动转为支撑；但突破或跌破的支撑压力线不要自动补新线。
+- 买入止损一般应在 3%-8% 区间，过小止损触发概率高。
+- 止损依据向前寻找：支撑、密集交易区上下沿、拉回支撑的关键 K 线下沿或最低价。
+- 持仓阶段如果已经设置止损，应等待止损触发。
+- 盈利超过 3R 后，趋势转弱才开始考虑止盈。
+- 卖出逻辑分为止损、止盈、保本止损。
+
+## 9. 最近典型训练/规则案例
+
+- `300011` / `2018-01-11`：阶段判断、支撑压力线补充逻辑。
+- `603658` / `2021-05-10`：当前阶段判断。
+- `000958` / `2024-02-07`：急跌后修复博弈买入逻辑。
+- `300422` / `2024-02-19`：急跌后可博弈修复，上方压力远时如何从观望调整为买入。
+- `300422` / `2024-10-21`：观望原因分析。
+- `605058` / `2025-06-30`：支撑位 26.34 附近误买，已加入硬拦截规则。
+- `002746` / `2024-10-25`：确认 K 线已经出现，不能机械等待再出一根阳线，否则可能导致盈亏比不足。
+- `002120` / `2016-05-17`：止损过小问题，止损一般需要大于 2%，更合理为 3%-8%。
+- `301536` / `2025-04-21`：止损位置过高，更合理参考 52.5；关键阳线低点/开盘价可作为止损依据，但要结合盈亏比。
+
+## 10. Git 注意事项
+
+当前项目可能没有远程仓库配置；如果 `git remote -v` 为空，则只能本地提交，无法 push。
+
+项目 `.gitignore` 已忽略：`*.sqlite`、`data_cache/`、`qmt_export/`、`_qmt_import_test.*`、`thinktrader_stock_doc.html`。
+
+不要把 `market_data.sqlite` 提交进 Git。
+
+## 11. 新对话建议第一步
+
+新 Codex 对话开始后，建议先说：
 
 ```text
-这是一个 A 股交易思维训练项目，目录是 C:\Users\admin\Documents\trading advice。
-请先阅读 PROJECT_HANDOFF.md、app.js、server.py、trading_rule_library.md，再继续开发。
-当前重点不是追求胜率，而是把我的交易思维通过训练数据沉淀成规则库。
-行情数据来自本地 market_data.sqlite，训练数据保存在 trade_replay_samples.jsonl。
-请不要删除训练数据。继续开发前先看 git status。
+请读取 C:\Users\admin\Documents\trading advice\PROJECT_HANDOFF.md，并检查 git status。
 ```
+
+然后再继续指定任务，例如：
+
+- 清理 `futures_daily_prices` 中重复的 `31#` 港股数据。
+- 增加 `ds` 目录不同前缀的市场分类规则。
+- 继续优化 AI 买入/卖出规则。
+- 做前端回测页面验证。
+- 打包项目给别人使用。

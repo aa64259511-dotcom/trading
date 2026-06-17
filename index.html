@@ -216,8 +216,16 @@
                       <span id="activeLevelInfo">正常浏览：可拖动画布、上下键缩放</span>
                     </div>
                     <div class="selected-level-tools hidden" id="selectedLevelTools">
+                      <label>线类型
+                        <select id="selectedLevelRole">
+                          <option value="support">支撑</option>
+                          <option value="near_resistance">近端压力</option>
+                          <option value="effective_resistance">有效压力</option>
+                          <option value="breakout_target">突破目标</option>
+                        </select>
+                      </label>
                       <label>画线原因 <input id="selectedLevelReason" type="text" placeholder="说明这条线的依据" /></label>
-                      <button class="secondary-button" id="saveSelectedLevelReason" type="button">写入画线原因</button>
+                      <button class="secondary-button" id="saveSelectedLevelReason" type="button">写入线类型/原因</button>
                       <button class="secondary-button danger-button" id="deleteSelectedLevel" type="button">删除选中线</button>
                     </div>
                     <canvas id="replayChart" width="1280" height="560"></canvas>
@@ -231,13 +239,14 @@
                 <aside class="replay-side-panel">
                   <section class="rule-advice-panel" id="ruleAdvicePanel" aria-live="polite">
                     <div class="rule-advice-header">
-                      <div>
+                      <div class="rule-advice-title-block">
                         <h3>AI建议</h3>
                         <p id="ruleAdviceStage">等待K线数据</p>
+                        <div class="rule-advice-action-card watch" id="ruleAdviceActionText"><span>操作建议</span><strong>--</strong></div>
                       </div>
                       <div class="rule-advice-actions">
                         <button class="rule-copy-button" id="copyRuleAdviceSummary" type="button" disabled>复制摘要</button>
-                        <span class="rule-advice-side" id="ruleAdviceSide">--</span>
+                        <button class="rule-copy-button" id="executeRuleAdvice" type="button" disabled>执行AI建议</button>
                         <strong id="ruleAdviceScore">--</strong>
                       </div>
                     </div>
@@ -257,6 +266,12 @@
                       <textarea id="aiDisagreeReason" placeholder="说明不认可AI建议的原因"></textarea>
                     </label>
                   </section>
+
+                  <div class="replay-navigation-actions" aria-label="训练时间导航">
+                    <button class="secondary-button" id="replayPrevCandle" type="button" disabled>回到上一日</button>
+                    <button class="secondary-button" id="replayNextCandle" type="button" disabled>下一日不记录</button>
+                    <span>仅浏览K线，不写入训练集</span>
+                  </div>
 
                   <div class="decision-actions">
                     <div class="decision-entry decision-buy-entry">
@@ -300,20 +315,23 @@
               <div class="form-header">
                 <div>
                   <h2>AI&#24314;&#35758;&#22238;&#27979;</h2>
-                  <p>&#25353;&#21382;&#21490;K&#32447;&#36880;&#26085;&#29983;&#25104;AI&#24314;&#35758;&#65292;&#33258;&#21160;&#27169;&#25311;&#20080;&#20837;&#12289;&#21334;&#20986;&#21644;&#27490;&#25439;&#65292;&#32479;&#35745;&#25910;&#30410;&#24773;&#20917;</p>
+                  <p>按历史K线逐日生成AI建议，所有交易动作按AI建议执行；每一日需要手动点击执行和下一日。</p>
                 </div>
               </div>
 
               <div class="field-grid compact-grid">
-                <label>&#32929;&#31080;&#20195;&#30721; <input id="backtestSymbol" type="text" value="002460" autocomplete="off" /></label>
-                <label>&#24320;&#22987;&#26085;&#26399; <input id="backtestStart" type="date" /></label>
+                <label>&#32929;&#31080;&#20195;&#30721; <input id="backtestSymbol" type="text" value="002460" autocomplete="off" /><strong class="blind-value hidden" id="blindBacktestSymbol">已隐藏</strong></label>
+                <label>&#24320;&#22987;&#26085;&#26399; <input id="backtestStart" type="date" /><strong class="blind-value hidden" id="blindBacktestDate">已隐藏</strong></label>
                 <label>&#32467;&#26463;&#26085;&#26399; <input id="backtestEnd" type="date" /></label>
-                <label>&#26368;&#20302;&#20080;&#20837;&#35780;&#20998; <input id="backtestMinScore" type="number" min="0" max="100" step="1" value="80" /></label>
                 <label>&#25163;&#32493;&#36153;/&#28369;&#28857; % <input id="backtestFeePct" type="number" min="0" step="0.01" value="0" /></label>
               </div>
 
               <div class="action-stack">
                 <button class="primary-button" id="runAiBacktest" type="button">&#24320;&#22987;&#22238;&#27979;</button>
+                <button class="secondary-button" id="startBlindBacktest" type="button">随机盲测</button>
+                <button class="secondary-button hidden" id="revealBacktestIdentity" type="button">显示股票和日期</button>
+                <button class="secondary-button" id="backtestExecuteAi" type="button" disabled>执行AI建议</button>
+                <button class="secondary-button" id="backtestNextDay" type="button" disabled>下一日</button>
               </div>
               <p class="training-status" id="backtestStatus" role="status" aria-live="polite"></p>
             </form>
@@ -323,9 +341,50 @@
                 <div>
                   <p class="eyebrow">AI Advice Backtest</p>
                   <h2 id="backtestTitle">&#31561;&#24453;&#22238;&#27979;</h2>
-                  <p>&#40664;&#35748;&#25353;&#25910;&#30424;&#20215;&#20080;&#20837;/&#21334;&#20986;&#65292;&#27490;&#25439;&#35302;&#21457;&#26102;&#25353;&#27490;&#25439;&#20215;&#21334;&#20986;&#65307;&#22238;&#27979;&#21482;&#20351;&#29992;&#24403;&#26085;&#21450;&#20043;&#21069;&#25968;&#25454;&#12290;</p>
+                  <p>默认按收盘价执行AI买入/卖出，止损触发时按止损价卖出；回测只使用当日及之前数据。</p>
                 </div>
               </div>
+
+              <section class="backtest-advice-card" id="backtestAdviceCard">
+                <div>
+                  <span>当前AI建议</span>
+                  <strong id="backtestAdviceAction">--</strong>
+                </div>
+                <div>
+                  <span>阶段</span>
+                  <strong id="backtestAdviceStage">--</strong>
+                </div>
+                <div>
+                  <span>模型</span>
+                  <strong id="backtestAdviceModel">--</strong>
+                </div>
+                <div>
+                  <span>匹配度</span>
+                  <strong id="backtestAdviceScore">--</strong>
+                </div>
+              </section>
+
+              <section class="backtest-level-panel" id="backtestLevelPanel">
+                <div class="backtest-level-head">
+                  <div>
+                    <h3>回测支撑压力画布</h3>
+                    <p id="backtestLevelPrompt">开始回测后，先在这里画出支撑/压力；价格突破或跌破现有线后会暂停，等待你补线。</p>
+                  </div>
+                  <strong id="backtestLevelDate">--</strong>
+                </div>
+                <div class="chart-tools backtest-chart-tools" aria-label="回测支撑压力画线工具">
+                  <button class="secondary-button" id="backtestAutoLevelLines" type="button">周线自动画线</button>
+                  <button class="secondary-button level-tool" id="backtestDrawLevelLine" type="button">画支撑压力线</button>
+                  <button class="secondary-button" id="backtestClearLevelLines" type="button">清空线</button>
+                  <button class="secondary-button danger-button" id="backtestDeleteSelectedLevel" type="button">删除选中线</button>
+                  <span id="backtestLevelCount">0 条线</span>
+                  <span id="backtestActiveLevelInfo">开始回测后可画线</span>
+                </div>
+                <div class="selected-level-tools hidden" id="backtestSelectedLevelTools">
+                  <label>选中线 <input id="backtestSelectedLevelInfo" type="text" readonly /></label>
+                </div>
+                <canvas id="backtestChart" width="1280" height="560"></canvas>
+              </section>
 
               <div class="metrics-strip backtest-metrics">
                 <div><span>&#24635;&#25910;&#30410;&#29575;</span><strong id="backtestReturn">--</strong></div>

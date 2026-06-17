@@ -543,15 +543,27 @@ canvas {
 }
 
 .rule-advice-header {
+  position: sticky;
+  top: 0;
+  z-index: 3;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
 }
 
 .rule-advice-header h3 {
   margin: 0;
   font-size: 15px;
+}
+
+.rule-advice-title-block {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
 }
 
 .rule-advice-header p {
@@ -560,7 +572,54 @@ canvas {
   font-size: 13px;
 }
 
-.rule-advice-header strong {
+.rule-advice-action-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  margin-top: 2px;
+  padding: 5px 9px;
+  border: 1px solid rgba(183, 121, 31, 0.28);
+  border-radius: 999px;
+  background: #fff9ee;
+  color: var(--amber);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.72);
+}
+
+.rule-advice-action-card span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.rule-advice-action-card strong {
+  min-width: auto;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  text-align: left;
+}
+
+.rule-advice-action-card.buy,
+.rule-advice-action-card.hold_position {
+  border-color: rgba(22, 134, 90, 0.28);
+  background: #f1fbf6;
+  color: var(--green);
+}
+
+.rule-advice-action-card.sell {
+  border-color: rgba(194, 65, 59, 0.28);
+  background: #fff6f5;
+  color: var(--red);
+}
+
+.rule-advice-action-card.hold_position {
+  border-color: rgba(35, 105, 184, 0.28);
+  background: #f3f7fc;
+  color: var(--blue);
+}
+
+#ruleAdviceScore {
   min-width: 62px;
   text-align: right;
   font-size: 20px;
@@ -625,6 +684,7 @@ canvas {
   padding-right: 4px;
   font-size: 13px;
   line-height: 1.45;
+  scrollbar-gutter: stable;
 }
 
 .rule-advice-body p {
@@ -757,6 +817,30 @@ canvas {
 .ai-disagree-reason textarea {
   min-height: 58px;
   resize: vertical;
+}
+
+.replay-navigation-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  align-items: center;
+  margin-top: 14px;
+  padding: 10px;
+  border: 1px dashed rgba(100, 114, 132, 0.36);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.replay-navigation-actions .secondary-button {
+  min-height: 36px;
+  margin-top: 0;
+}
+
+.replay-navigation-actions span {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .decision-actions {
@@ -916,7 +1000,7 @@ canvas {
 
 .selected-level-tools {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) 132px 112px;
+  grid-template-columns: minmax(110px, 150px) minmax(240px, 1fr) 132px 112px;
   gap: 8px;
   align-items: end;
   margin-bottom: 10px;
@@ -1170,6 +1254,78 @@ canvas {
   min-height: 560px;
 }
 
+.backtest-advice-card {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr 1.2fr 90px;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: linear-gradient(135deg, #fffdf7, #f7fbff);
+}
+
+.backtest-advice-card div {
+  display: grid;
+  gap: 4px;
+}
+
+.backtest-advice-card span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.backtest-advice-card strong {
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.backtest-level-panel {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.backtest-level-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.backtest-level-head h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.backtest-level-head p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.backtest-chart-tools {
+  grid-template-columns: 112px 112px 84px 104px minmax(64px, 80px) minmax(0, 1fr);
+}
+
+#backtestChart {
+  display: block;
+  width: 100%;
+  height: 420px;
+  cursor: grab;
+}
+
+#backtestChart.dragging {
+  cursor: grabbing;
+}
+
+
 .backtest-metrics {
   grid-template-columns: repeat(6, minmax(0, 1fr));
 }
@@ -1382,6 +1538,10 @@ canvas {
   .dataset-action-row,
   .chart-tools,
   .decision-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .replay-navigation-actions {
     grid-template-columns: 1fr;
   }
 

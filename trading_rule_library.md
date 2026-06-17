@@ -233,10 +233,22 @@
 止损要在“能抗普通波动”和“失败成本可控”之间平衡。买入止损空间以 `3%-8%` 为有效区间，不能只贴当前价，也不能任意放大。
 
 - 先向买点之前寻找结构依据，而不是机械用当前价下方一点点。
-- 依据优先级：支撑/支撑下沿、密集交易区下沿、突破后的密集交易区上沿、拉回支撑关键 K 线实体下沿、关键 K 线最低价。
+- 依据优先级：关键阳线开盘价、关键阳线最低价下方、支撑/支撑下沿、密集交易区下沿、突破后的密集交易区上沿。
 - 低于 `3%` 时，AI 先降为“建议观望”，继续向前找更稳定的结构止损位。
 - 超过 `8%` 时，失败成本过高，等待更近的防守位或新平台。
 - 放宽到 `3%-8%` 后仍能满足约 `3R`，才考虑买入；若 `3R` 被破坏，则放弃。
+
+
+### 3.0L 关键阳线止损：开盘价或最低价按盈亏比选择
+
+关键阳线的止损不固定只看一个价格。急跌修复或支撑验证买入时，可以同时测算关键阳线开盘价和最低价下方，再用止损空间与盈亏比筛选。
+
+- 关键阳线优先看买点前 `3-10` 个交易日内，位置在急跌后、支撑附近、跌破拉回或密集交易区下沿附近。
+- 关键阳线需要收阳，收盘高于前一日收盘，后续 K 线没有有效跌破这根阳线低点。
+- 候选止损包括：关键阳线开盘价、关键阳线最低价下方、支撑/支撑下沿、密集交易区上下沿。
+- 若关键阳线开盘价已经满足 `3%-8%` 止损区间且到压力位仍有约 `3R`，可以用开盘价。
+- 若开盘价过高、太容易被扫，或低于 `3%`，再看关键阳线最低价下方。
+- 若最低价下方导致盈亏比不足 `3R`，则放弃买入，不为了买入而硬调止损。
 
 ### 3.1 跌破支撑后快速拉回：从“直接买入”修正为“候选买点”
 
@@ -367,6 +379,7 @@
 - 核心买点：跌破支撑后快速拉回；突破交易密集区后缩量回踩不破并再次小阳线。
 - 当前收盘价低于5日线：所有买入模型强制降为观察，不允许建议买入。
 - 买入止损空间：一般要大于3%，低于3%属于止损过紧，容易被普通波动触发；放宽到3%-8%后仍满足3R才买。
+- 关键阳线止损：开盘价和最低价下方都要测算，优先选止损空间3%-8%且仍满足3R的位置。
 - `AI buy >= 90` 但只有“跌破支撑后收回”：若缺少平台/形态/连续阳线，降为观察。
 - 人工买入但 AI 观望：若理由包含急跌修复、小平台突破、W 底、头肩底、震仓拉回、突破买入，提高对应模型分。
 - AI 因接近压力或跌破 5 日线建议卖出：先输出卖出预警，除非同时强转弱或跌破买入依据。
@@ -384,6 +397,26 @@
 - 继续观察“低于5日线但出现拉回”的样本，标注等待站上5日线后是否更符合你的买点。
 - 继续记录 AI 建议买入但你选择观望的原因。
 - 继续标注买入样本的实际止损空间，尤其是低于3%时是否容易被普通波动触发。
+- 继续标注关键阳线止损样本：开盘价、最低价下方、支撑/密集交易区上下沿分别测算后的R倍数。
 - 卖出反馈中区分“压力预警”“跌破5日线预警”“强转弱执行”“跌破买入依据执行”。
 - 支撑压力线训练继续记录移动原因，尤其是为什么贴近实体区。
 - 每次买入补充体系标签：急跌修复、支撑拉回、平台突破、W底、头肩底、震仓。
+
+### 3.0M Pressure Layering: Conservative Pressure vs Breakout Target
+
+- Near pressure: recent swing high, short-term box upper edge, or rebound high. It is a risk warning, not always the final target.
+- Effective pressure: weekly high, long platform, or obvious body congestion zone. Normal buy setups use this for R/R.
+- Breakout target: the next pressure layer after near pressure has been broken and retested.
+
+Normal support validation, reclaim, and fast-drop repair setups use near/effective pressure by default. Do not jump to a far target just to make 3R pass.
+
+Only use the breakout target when the setup has broken a dense trading zone or near pressure, the pullback is shrinking-volume and holds the breakout level, a small bullish confirmation candle appears, close is not below MA5, stop distance is 3%-8%, and the next target is explicit.
+
+AI advice must display near pressure, effective pressure, breakout target, adopted pressure mode, and breakout failure conditions.
+
+### 3.0N 压力突破后的角色迁移
+
+- 当收盘价从压力线下方突破到上方后，原压力线自动转为支撑线，不再作为上方压力参与普通盈亏比测算。
+- 适用对象包括近端压力、有效压力和突破目标；转化后需在画线记录中保留“突破后转支撑”的原因。
+- 角色转为支撑不等于立即买入：仍需等待回踩不破、缩量企稳、小阳线确认、收盘不低于 MA5，并重新寻找上方新压力/突破目标测算约 3R。
+- 若突破后上方没有新的有效压力或目标，回测/训练应暂停并要求补充上方压力线，而不是自动补线或继续沿用已突破压力。
