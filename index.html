@@ -3,16 +3,16 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>交易思维训练</title>
-    <link rel="stylesheet" href="styles.css?v=20260616-copy-advice-summary" />
+    <title>AI交易提款机</title>
+    <link rel="stylesheet" href="styles.css?v=20260617-hk-name-title" />
   </head>
   <body>
     <main class="app-shell">
-      <section class="workspace" aria-label="交易思维训练工作台">
+      <section class="workspace" aria-label="AI交易提款机工作台">
         <header class="topbar">
           <div>
             <p class="eyebrow">Trade Mind Trainer</p>
-            <h1>交易思维训练</h1>
+            <h1>AI交易提款机</h1>
           </div>
           <div class="market-pulse" aria-label="市场状态">
             <span class="pulse-dot"></span>
@@ -20,10 +20,109 @@
           </div>
         </header>
         <nav class="mode-tabs" aria-label="&#27169;&#22359;&#20999;&#25442;">
+          <button class="tab-button" type="button" data-view="market">&#34892;&#24773;</button>
           <button class="tab-button active" type="button" data-view="replay">&#20132;&#26131;&#35757;&#32451;</button>
           <button class="tab-button" type="button" data-view="backtest">AI&#24314;&#35758;&#22238;&#27979;</button>
           <button class="tab-button" type="button" data-view="dataset">&#35757;&#32451;&#38598;&#31649;&#29702;</button>
         </nav>
+
+        <section class="market-view hidden" id="marketView">
+          <div class="market-layout">
+            <aside class="market-watchlist-panel">
+              <div class="market-panel-head">
+                <div>
+                  <h2>&#34892;&#24773;</h2>
+                  <p>&#33258;&#36873;&#32929;&#21015;&#34920;&#19982;K&#32447;&#26597;&#30475;</p>
+                </div>
+              </div>
+              <label class="stock-search-label market-search-label">
+                &#25628;&#32034;&#32929;&#31080;
+                <input id="marketStockSearch" type="text" placeholder="&#20195;&#30721; / &#20840;&#31216; / &#31616;&#31216;" autocomplete="off" />
+                <div class="stock-search-results hidden" id="marketStockSearchResults"></div>
+              </label>
+              <button class="primary-button" id="marketLoadStock" type="button">&#26597;&#30475;&#34892;&#24773;</button>
+              <p class="training-status" id="marketStatus" role="status" aria-live="polite"></p>
+              <div class="watchlist-head">
+                <strong>&#33258;&#36873;&#32929;</strong>
+                <small id="watchlistCount">0 &#21482;</small>
+              </div>
+              <div class="watchlist" id="watchlist"></div>
+            </aside>
+
+            <section class="market-chart-panel">
+              <div class="market-chart-head">
+                <div>
+                  <p class="eyebrow">Market Chart</p>
+                  <h2 id="marketTitle">&#35831;&#36873;&#25321;&#32929;&#31080;</h2>
+                  <span id="marketSubtitle">--</span>
+                  <span id="marketDataSource">&#25968;&#25454;&#26469;&#28304;&#65306;&#26412;&#22320;K&#32447;</span>
+                </div>
+              </div>
+              <div class="market-main-grid">
+                <div class="replay-chart-column">
+                  <div class="kline-card market-kline-card">
+                    <div class="kline-card-header">
+                      <div class="chart-tools market-chart-tools" aria-label="&#34892;&#24773;&#30011;&#32447;&#24037;&#20855;">
+                        <button class="secondary-button" id="marketAutoLevelLines" type="button">&#33258;&#21160;&#30011;&#32447;</button>
+                        <button class="secondary-button level-tool" id="marketDrawLevelLine" type="button">&#30011;&#25903;&#25745;&#21387;&#21147;&#32447;</button>
+                        <button class="secondary-button" id="marketClearLevelLines" type="button">&#28165;&#31354;&#32447;</button>
+                        <button class="secondary-button" id="marketAddWatch" type="button">&#21152;&#20837;&#33258;&#36873;&#32929;</button>
+                        <button class="text-button" id="marketRefresh" type="button">&#21047;&#26032;</button>
+                        <span id="marketActiveLevelInfo">&#27491;&#24120;&#27983;&#35272;&#65306;&#21487;&#28857;&#20987;&#30011;&#32447;&#25110;&#20999;&#25442;&#32423;&#21035;</span>
+                      </div>
+                      <div class="timeframe-tabs market-timeframe-tabs" role="tablist" aria-label="Market k line timeframe">
+                        <button class="timeframe-button market-timeframe-button active" type="button" data-frame="daily">&#26085;&#32447;</button>
+                        <button class="timeframe-button market-timeframe-button" type="button" data-frame="weekly">&#21608;&#32447;</button>
+                        <button class="timeframe-button market-timeframe-button" type="button" data-frame="monthly">&#26376;&#32447;</button>
+                        <button class="timeframe-button market-timeframe-button" type="button" data-frame="5m">5m</button>
+                        <button class="timeframe-button market-timeframe-button" type="button" data-frame="30m">30m</button>
+                        <button class="timeframe-button market-timeframe-button" type="button" data-frame="60m">60m</button>
+                      </div>
+                    </div>
+                    <div class="selected-level-tools hidden" id="marketSelectedLevelTools">
+                      <label>&#32447;&#31867;&#22411;
+                        <select id="marketSelectedLevelRole">
+                          <option value="support">&#25903;&#25745;</option>
+                          <option value="near_resistance">&#36817;&#31471;&#21387;&#21147;</option>
+                          <option value="effective_resistance">&#26377;&#25928;&#21387;&#21147;</option>
+                          <option value="breakout_target">&#31361;&#30772;&#30446;&#26631;</option>
+                        </select>
+                      </label>
+                      <label>&#30011;&#32447;&#21407;&#22240; <input id="marketSelectedLevelReason" type="text" placeholder="&#35828;&#26126;&#36825;&#26465;&#32447;&#30340;&#20381;&#25454;" /></label>
+                      <button class="secondary-button" id="marketSaveSelectedLevelReason" type="button">&#20889;&#20837;&#32447;&#31867;&#22411;/&#21407;&#22240;</button>
+                      <button class="secondary-button danger-button" id="marketDeleteSelectedLevel" type="button">&#21024;&#38500;&#36873;&#20013;&#32447;</button>
+                    </div>
+                    <div class="market-canvas-wrap">
+                      <button class="canvas-watch-button" id="marketAddWatchOverlay" type="button">&#21152;&#20837;&#33258;&#36873;</button>
+                      <canvas id="marketChart" width="1280" height="560"></canvas>
+                    </div>
+                  </div>
+                </div>
+                <aside class="replay-side-panel market-side-panel">
+                  <button class="primary-button" id="marketAiAdvice" type="button">AI&#24314;&#35758;</button>
+                  <section class="rule-advice-panel market-rule-advice" id="marketAiCard" aria-live="polite">
+                    <div class="rule-advice-header">
+                      <div class="rule-advice-title-block">
+                        <h3>AI&#24314;&#35758;</h3>
+                        <p id="marketAiStage">&#31561;&#24453;K&#32447;&#25968;&#25454;</p>
+                        <div class="rule-advice-action-card watch" id="marketAiActionText"><span>&#25805;&#20316;&#24314;&#35758;</span><strong id="marketAiDecision">--</strong></div>
+                      </div>
+                      <div class="rule-advice-actions">
+                        <strong id="marketAiScore">--</strong>
+                      </div>
+                    </div>
+                    <div class="rule-advice-body" id="marketAiBody">
+                      &#21152;&#36733;&#34892;&#24773;&#21518;&#65292;&#20351;&#29992;&#21644;&#20132;&#26131;&#35757;&#32451;&#19968;&#33268;&#30340;&#26679;&#24335;&#26174;&#31034;AI&#24314;&#35758;&#12290;
+                    </div>
+                    <strong id="marketAiPhase" class="hidden">--</strong>
+                    <strong id="marketAiModel" class="hidden">--</strong>
+                  </section>
+                </aside>
+              </div>
+            </section>
+          </div>
+        </section>
+
 
         <section class="content-grid strategy-view" id="strategyView">
           <form class="analysis-form" id="analysisForm">
@@ -113,7 +212,7 @@
               <div class="action-stack">
                 <button class="primary-button" id="randomTraining" type="button">随机训练</button>
                 <div class="inline-fetch">
-                  <label>股票代码 <input id="trainSymbol" type="text" value="000001" /></label>
+                  <label>股票代码 <input id="trainSymbol" type="text" value="000001" placeholder="A股6位 / 港股5位" /></label>
                   <button class="secondary-button" id="fetchRealTraining" type="button">按代码拉取</button>
                 </div>
               </div>
@@ -179,16 +278,11 @@
                   <h2 id="replayTitle">交易思维训练</h2>
                   <p>只显示当前日期之前的K线，逐根推进并保存决策样本</p>
                 </div>
-                <div class="timeframe-tabs" role="tablist" aria-label="K线周期">
-                  <button class="timeframe-button active" type="button" data-frame="daily">日线</button>
-                  <button class="timeframe-button" type="button" data-frame="weekly">周线</button>
-                  <button class="timeframe-button" type="button" data-frame="monthly">月线</button>
-                </div>
               </div>
 
               <div class="replay-fetch-row">
-                <label class="stock-search-label">股票名称/首字母 <input id="replayStockSearch" type="text" placeholder="如：赣锋锂业 / GFLY" autocomplete="off" /><div class="stock-search-results hidden" id="stockSearchResults"></div></label>
-                <label>股票代码 <input id="replaySymbol" type="text" value="002460" autocomplete="off" /><strong class="blind-value hidden" id="blindSymbol">已隐藏</strong></label>
+                <label class="stock-search-label">股票名称/首字母 <input id="replayStockSearch" type="text" placeholder="如：赣锋锂业 / GFLY / 00700" autocomplete="off" /><div class="stock-search-results hidden" id="stockSearchResults"></div></label>
+                <label>股票代码 <input id="replaySymbol" type="text" value="002460" placeholder="A股6位 / 港股5位" autocomplete="off" /><strong class="blind-value hidden" id="blindSymbol">已隐藏</strong></label>
                 <label>开始日期 <input id="replayDate" type="date" /><strong class="blind-value hidden" id="blindDate">已隐藏</strong></label>
                 <button class="primary-button" id="startReplay" type="button">开始训练</button>
                 <button class="secondary-button" id="startBlindReplay" type="button">随机盲训</button>
@@ -199,6 +293,7 @@
               <div class="metrics-strip">
                 <div><span>当前日期</span><strong id="replayCurrentDate">--</strong></div>
                 <div><span>收盘价</span><strong id="replayClose">--</strong></div>
+                <div><span>行情来源</span><strong id="replayQuoteStatus">本地日线</strong></div>
                 <div><span>买入价</span><strong id="replayEntryPrice">--</strong></div>
                 <div><span>当前收益率</span><strong id="replayReturn">--</strong></div>
                 <div><span>累计收益率</span><strong id="replayTotalReturn">0.00%</strong></div>
@@ -207,13 +302,23 @@
               <div class="replay-main-grid">
                 <div class="replay-chart-column">
                   <div class="kline-card">
-                    <div class="chart-tools" aria-label="支撑压力画线工具">
+                    <div class="kline-card-header">
+                      <div class="chart-tools" aria-label="支撑压力画线工具">
                       <button class="secondary-button" id="autoLevelLines" type="button">周线自动画线</button>
                       <button class="secondary-button level-tool" id="drawLevelLine" type="button">画支撑压力线</button>
                       <button class="secondary-button" id="clearLevelLines" type="button">清空线</button>
                       <button class="secondary-button" id="saveLevelTrainingSample" type="button">保存画线训练样本</button>
                       <span id="levelTrainingCount">0 条修正</span>
                       <span id="activeLevelInfo">正常浏览：可拖动画布、上下键缩放</span>
+                      </div>
+                    <div class="timeframe-tabs" role="tablist" aria-label="K line timeframe">
+                      <button class="timeframe-button active" type="button" data-frame="daily">&#26085;&#32447;</button>
+                      <button class="timeframe-button" type="button" data-frame="weekly">&#21608;&#32447;</button>
+                      <button class="timeframe-button" type="button" data-frame="monthly">&#26376;&#32447;</button>
+                      <button class="timeframe-button" type="button" data-frame="5m">5m</button>
+                      <button class="timeframe-button" type="button" data-frame="30m">30m</button>
+                      <button class="timeframe-button" type="button" data-frame="60m">60m</button>
+                    </div>
                     </div>
                     <div class="selected-level-tools hidden" id="selectedLevelTools">
                       <label>线类型
@@ -320,7 +425,7 @@
               </div>
 
               <div class="field-grid compact-grid">
-                <label>&#32929;&#31080;&#20195;&#30721; <input id="backtestSymbol" type="text" value="002460" autocomplete="off" /><strong class="blind-value hidden" id="blindBacktestSymbol">已隐藏</strong></label>
+                <label>&#32929;&#31080;&#20195;&#30721; <input id="backtestSymbol" type="text" value="002460" placeholder="A股6位 / 港股5位" autocomplete="off" /><strong class="blind-value hidden" id="blindBacktestSymbol">已隐藏</strong></label>
                 <label>&#24320;&#22987;&#26085;&#26399; <input id="backtestStart" type="date" /><strong class="blind-value hidden" id="blindBacktestDate">已隐藏</strong></label>
                 <label>&#32467;&#26463;&#26085;&#26399; <input id="backtestEnd" type="date" /></label>
                 <label>&#25163;&#32493;&#36153;/&#28369;&#28857; % <input id="backtestFeePct" type="number" min="0" step="0.01" value="0" /></label>
@@ -420,6 +525,6 @@
       </section>
     </main>
 
-    <script src="app.js?v=20260616-copy-advice-summary"></script>
+    <script src="app.js?v=20260617-hk-name-title"></script>
   </body>
 </html>

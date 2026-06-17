@@ -5,6 +5,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from functools import lru_cache
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -50,7 +51,69 @@ MARKET_DB = Path("market_data.sqlite")
 TRADE_REPLAY_DATASET = Path("trade_replay_samples.jsonl")
 LEVEL_TRAINING_DATASET = Path("level_training_samples.jsonl")
 STOCK_NAME_INDEX = Path("stock_names.json")
+REALTIME_QUOTE_CACHE = Path("realtime_quotes.json")
+REALTIME_WATCHLIST_CACHE = Path("realtime_watchlist.json")
 MARKET_HISTORY_START = pd.Timestamp("1990-01-01")
+HK_STOCK_NAME_OVERRIDES = {
+    "00005": "汇丰控股",
+    "00016": "新鸿基地产",
+    "00027": "银河娱乐",
+    "00066": "港铁公司",
+    "00175": "吉利汽车",
+    "00241": "阿里健康",
+    "00267": "中信股份",
+    "00288": "万洲国际",
+    "00386": "中国石油化工股份",
+    "00669": "创科实业",
+    "00700": "腾讯控股",
+    "00728": "中国电信",
+    "00762": "中国联通",
+    "00857": "中国石油股份",
+    "00883": "中国海洋石油",
+    "00939": "建设银行",
+    "00941": "中国移动",
+    "00992": "联想集团",
+    "01024": "快手-W",
+    "01088": "中国神华",
+    "01211": "比亚迪股份",
+    "01299": "友邦保险",
+    "01398": "工商银行",
+    "01810": "小米集团-W",
+    "01818": "招金矿业",
+    "01876": "百威亚太",
+    "01918": "融创中国",
+    "02015": "理想汽车-W",
+    "02020": "安踏体育",
+    "02269": "药明生物",
+    "02318": "中国平安",
+    "02319": "蒙牛乳业",
+    "02331": "李宁",
+    "02333": "长城汽车",
+    "02382": "舜宇光学科技",
+    "02628": "中国人寿",
+    "02800": "盈富基金",
+    "02828": "恒生中国企业",
+    "02899": "紫金矿业",
+    "03690": "美团-W",
+    "03968": "招商银行",
+    "03988": "中国银行",
+    "06030": "中信证券",
+    "06618": "京东健康",
+    "06690": "海尔智家",
+    "09868": "小鹏汽车-W",
+    "09888": "百度集团-SW",
+    "09961": "携程集团-S",
+    "09988": "阿里巴巴-W",
+    "09999": "网易-S",
+}
+HK_STOCK_NAME_OVERRIDES.update({
+    "00700": "\u817e\u8baf\u63a7\u80a1",
+    "00941": "\u4e2d\u56fd\u79fb\u52a8",
+    "01810": "\u5c0f\u7c73\u96c6\u56e2-W",
+    "03690": "\u7f8e\u56e2-W",
+    "09988": "\u963f\u91cc\u5df4\u5df4-W",
+    "09999": "\u7f51\u6613-S",
+})
 PROXY_ENV_KEYS = (
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -252,10 +315,102 @@ def market_db_connect():
     return conn
 
 
-def load_local_daily(symbol, start_ts=None, end_ts=None):
-    symbol = str(symbol).strip().zfill(6)
+def normalize_security_symbol(symbol, market=None):
+    text = str(symbol or "").strip().upper().replace(" ", "")
+    market_hint = str(market or "").strip().lower()
+    if not text:
+        raise ValueError("symbol is required")
+
+    explicit_hk = market_hint in {"hk", "hongkong", "hkg", "港股"}
+    if text.startswith("31#"):
+        explicit_hk = True
+        code = text.split("#", 1)[1]
+        raw_code = text
+    else:
+        raw_code = ""
+        code = text
+        for prefix in ("HK:", "HK.", "HK-", "HK_"):
+            if code.startswith(prefix):
+                explicit_hk = True
+                code = code[len(prefix):]
+                break
+        if code.startswith("HK") and code[2:].isdigit():
+            explicit_hk = True
+            code = code[2:]
+        for suffix in (".HK", "-HK", "_HK", ":HK"):
+            if code.endswith(suffix):
+                explicit_hk = True
+                code = code[:-len(suffix)]
+                break
+        for suffix in (".SH", ".SZ", ".BJ"):
+            if code.endswith(suffix):
+                code = code[:-len(suffix)]
+                break
+        if "#" in code:
+            prefix, tail = code.split("#", 1)
+            explicit_hk = explicit_hk or prefix == "31"
+            raw_code = code
+            code = tail
+
+    if explicit_hk or (code.isdigit() and len(code) == 5):
+        hk_symbol = code.zfill(5) if code.isdigit() else code
+        return {
+            "market": "hk",
+            "symbol": hk_symbol,
+            "raw_code": raw_code or f"31#{hk_symbol}",
+            "display": f"HK:{hk_symbol}",
+            "table": "hk_daily_prices",
+        }
+
+    cn_symbol = code.zfill(6) if code.isdigit() else code
+    return {
+        "market": "cn",
+        "symbol": cn_symbol,
+        "raw_code": "",
+        "display": cn_symbol,
+        "table": "daily_prices",
+    }
+
+
+def load_local_daily(symbol, start_ts=None, end_ts=None, market=None):
+    info = normalize_security_symbol(symbol, market)
     conditions = ["symbol = ?"]
-    params = [symbol]
+    params = [info["symbol"]]
+    if info["market"] == "hk" and info["raw_code"]:
+        conditions = ["(symbol = ? OR raw_code = ?)"]
+        params = [info["symbol"], info["raw_code"]]
+    if start_ts is not None:
+        conditions.append("trade_date >= ?")
+        params.append(pd.Timestamp(start_ts).strftime("%Y-%m-%d"))
+    if end_ts is not None:
+        conditions.append("trade_date <= ?")
+        params.append(pd.Timestamp(end_ts).strftime("%Y-%m-%d"))
+    table = info["table"]
+    query = f"""
+        SELECT trade_date AS date, open, high, low, close, volume, amount, turnover
+        FROM {table}
+        WHERE {' AND '.join(conditions)}
+        ORDER BY trade_date
+    """
+    with market_db_connect() as conn:
+        df = pd.read_sql_query(query, conn, params=params)
+    if df.empty:
+        raise ValueError(f"本地数据库没有 {info['display']} 在指定日期范围内的日线数据。")
+    df["date"] = pd.to_datetime(df["date"])
+    for column in ["open", "high", "low", "close", "volume", "amount", "turnover"]:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+    df["market"] = info["market"]
+    df["symbol"] = info["symbol"]
+    return df.dropna(subset=["date", "open", "high", "low", "close"]).reset_index(drop=True)
+
+
+def load_local_minute(symbol, start_ts=None, end_ts=None, market=None, period="5m"):
+    info = normalize_security_symbol(symbol, market)
+    if info["market"] != "cn":
+        return pd.DataFrame(columns=["date", "tradeDate", "open", "high", "low", "close", "volume", "amount", "market", "symbol"])
+    conditions = ["symbol = ?", "period = ?"]
+    params = [info["symbol"], period]
     if start_ts is not None:
         conditions.append("trade_date >= ?")
         params.append(pd.Timestamp(start_ts).strftime("%Y-%m-%d"))
@@ -263,26 +418,375 @@ def load_local_daily(symbol, start_ts=None, end_ts=None):
         conditions.append("trade_date <= ?")
         params.append(pd.Timestamp(end_ts).strftime("%Y-%m-%d"))
     query = f"""
-        SELECT trade_date AS date, open, high, low, close, volume, amount, turnover
-        FROM daily_prices
+        SELECT trade_time AS date, trade_date AS tradeDate, open, high, low, close, volume, amount
+        FROM minute_prices
         WHERE {' AND '.join(conditions)}
-        ORDER BY trade_date
+        ORDER BY trade_time
     """
-    with market_db_connect() as conn:
-        df = pd.read_sql_query(query, conn, params=params)
+    try:
+        with market_db_connect() as conn:
+            df = pd.read_sql_query(query, conn, params=params)
+    except (sqlite3.OperationalError, ValueError):
+        return pd.DataFrame(columns=["date", "tradeDate", "open", "high", "low", "close", "volume", "amount", "market", "symbol"])
     if df.empty:
-        raise ValueError(f"本地数据库没有 {symbol} 在指定日期范围内的日线数据。")
+        return df
     df["date"] = pd.to_datetime(df["date"])
-    for column in ["open", "high", "low", "close", "volume", "amount", "turnover"]:
+    df["tradeDate"] = df["tradeDate"].astype(str)
+    for column in ["open", "high", "low", "close", "volume", "amount"]:
         if column in df.columns:
             df[column] = pd.to_numeric(df[column], errors="coerce")
+    df["market"] = info["market"]
+    df["symbol"] = info["symbol"]
     return df.dropna(subset=["date", "open", "high", "low", "close"]).reset_index(drop=True)
 
 
-def local_symbols():
+def aggregate_minute_bars(df, bars_per_group):
+    if df.empty:
+        return df.copy()
+    rows = []
+    for _, day_df in df.sort_values("date").groupby("tradeDate", sort=True):
+        day_df = day_df.reset_index(drop=True)
+        grouped = day_df.assign(_bucket=day_df.index // int(bars_per_group)).groupby("_bucket", as_index=False)
+        agg = grouped.agg({
+            "date": "last",
+            "tradeDate": "last",
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+            "amount": "sum",
+            "market": "last",
+            "symbol": "last",
+        })
+        rows.append(agg.drop(columns=["_bucket"], errors="ignore"))
+    return pd.concat(rows, ignore_index=True) if rows else df.iloc[0:0].copy()
+
+
+def latest_local_trade_day(symbol, market=None):
+    info = normalize_security_symbol(symbol, market)
+    conditions = ["symbol = ?"]
+    params = [info["symbol"]]
+    if info["market"] == "hk" and info["raw_code"]:
+        conditions = ["(symbol = ? OR raw_code = ?)"]
+        params = [info["symbol"], info["raw_code"]]
+    with market_db_connect() as conn:
+        row = conn.execute(
+            f"""
+            SELECT MAX(trade_date) AS trade_date
+            FROM {info['table']}
+            WHERE {' AND '.join(conditions)}
+            """,
+            params,
+        ).fetchone()
+    if not row or not row["trade_date"]:
+        raise ValueError(f"No local daily data for {info['display']}.")
+    return pd.Timestamp(row["trade_date"])
+
+
+def safe_float(value, default=None):
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def quote_date(value=None):
+    if value in (None, ""):
+        return pd.Timestamp.now().strftime("%Y-%m-%d")
+    text = str(value).strip()
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) >= 14:
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+    if len(digits) == 13:
+        return pd.Timestamp.fromtimestamp(int(digits) / 1000).strftime("%Y-%m-%d")
+    if len(digits) == 10:
+        return pd.Timestamp.fromtimestamp(int(digits)).strftime("%Y-%m-%d")
+    if len(digits) >= 8:
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+    parsed = pd.to_datetime(text, errors="coerce")
+    return pd.Timestamp.now().strftime("%Y-%m-%d") if pd.isna(parsed) else parsed.strftime("%Y-%m-%d")
+
+
+def realtime_key(symbol, market=None):
+    info = normalize_security_symbol(symbol, market)
+    return f"{info['market']}:{info['symbol']}", info
+
+
+def load_realtime_quotes():
+    if not REALTIME_QUOTE_CACHE.exists():
+        return {}
+    try:
+        with REALTIME_QUOTE_CACHE.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_realtime_quotes(quotes):
+    with REALTIME_QUOTE_CACHE.open("w", encoding="utf-8") as handle:
+        json.dump(quotes, handle, ensure_ascii=False, indent=2)
+
+
+def row_get(row, *keys):
+    if not isinstance(row, dict):
+        return None
+    for key in keys:
+        if key in row and row[key] not in (None, ""):
+            return row[key]
+    return None
+
+
+@lru_cache(maxsize=2048)
+def local_volume_unit_factor(symbol, market=None):
+    info = normalize_security_symbol(symbol, market)
+    try:
+        with market_db_connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT close, volume, amount
+                FROM {info['table']}
+                WHERE symbol = ? AND close > 0 AND volume > 0 AND amount > 0
+                ORDER BY trade_date DESC
+                LIMIT 20
+                """,
+                (info["symbol"],),
+            ).fetchall()
+    except Exception:
+        return 1.0
+    factors = []
+    for row in rows:
+        close = safe_float(row["close"])
+        volume = safe_float(row["volume"])
+        amount = safe_float(row["amount"])
+        if close and volume and amount:
+            factors.append(amount / close / volume)
+    if not factors:
+        return 1.0
+    factors = sorted(value for value in factors if value > 0)
+    if not factors:
+        return 1.0
+    return float(factors[len(factors) // 2])
+
+
+def normalize_realtime_volume(info, row, close):
+    raw_volume = safe_float(row_get(row, "volume", "vol"), 0)
+    amount = safe_float(row_get(row, "amount"), 0)
+    if not raw_volume or not amount or not close:
+        return raw_volume, raw_volume
+    local_factor = local_volume_unit_factor(info["symbol"], info["market"])
+    if not local_factor:
+        return raw_volume, raw_volume
+    implied_shares = amount / close
+    # QMT returns different volume units by market; align realtime bars to the
+    # local daily table unit so the volume pane stays comparable.
+    return implied_shares / local_factor, raw_volume
+
+
+def normalize_realtime_quote(symbol, row=None, market=None):
+    row = row or {}
+    code = row_get(row, "symbol", "stock_code", "code", "instrument") or symbol
+    info = normalize_security_symbol(code, row_get(row, "market") or market)
+    close = safe_float(row_get(row, "close", "lastPrice", "last_price", "price", "latest", "last"))
+    open_price = safe_float(row_get(row, "open"), close)
+    high = safe_float(row_get(row, "high"), close)
+    low = safe_float(row_get(row, "low"), close)
+    if close is None or open_price is None or high is None or low is None:
+        raise ValueError(f"实时行情缺少 OHLC/最新价字段：{info['display']}")
+    trade_date = quote_date(row_get(row, "trade_date", "date", "stime", "time", "timetag", "datetime"))
+    normalized_volume, raw_volume = normalize_realtime_volume(info, row, close)
+    quote = {
+        "symbol": info["symbol"],
+        "market": info["market"],
+        "displaySymbol": info["display"],
+        "trade_date": trade_date,
+        "open": open_price,
+        "high": max(high, open_price, close, low),
+        "low": min(low, open_price, close, high),
+        "close": close,
+        "volume": normalized_volume,
+        "rawVolume": raw_volume,
+        "amount": safe_float(row_get(row, "amount"), 0),
+        "turnover": safe_float(row_get(row, "turnover")),
+        "source": str(row_get(row, "source") or "qmt_realtime"),
+        "receivedAt": pd.Timestamp.now().isoformat(),
+    }
+    key, _ = realtime_key(info["symbol"], info["market"])
+    return key, quote
+
+
+def flatten_realtime_payload(payload):
+    if isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, dict):
+                yield row_get(item, "symbol", "stock_code", "code", "instrument"), item
+        return
+    if not isinstance(payload, dict):
+        return
+    if "quotes" in payload:
+        yield from flatten_realtime_payload(payload.get("quotes"))
+        return
+    if row_get(payload, "symbol", "stock_code", "code", "instrument"):
+        yield row_get(payload, "symbol", "stock_code", "code", "instrument"), payload
+        return
+    for symbol, row in payload.items():
+        if isinstance(row, dict):
+            yield symbol, row
+
+
+def save_realtime_payload(payload):
+    quotes = load_realtime_quotes()
+    saved = []
+    for symbol, row in flatten_realtime_payload(payload):
+        if not symbol:
+            continue
+        key, quote = normalize_realtime_quote(symbol, row)
+        quotes[key] = quote
+        saved.append(quote)
+    if saved:
+        save_realtime_quotes(quotes)
+    return {"saved": len(saved), "quotes": saved}
+
+
+def realtime_quote(symbol, market=None):
+    key, info = realtime_key(symbol, market)
+    quote = load_realtime_quotes().get(key)
+    if not quote:
+        return {"symbol": info["symbol"], "market": info["market"], "displaySymbol": info["display"], "quote": None}
+    return {"symbol": info["symbol"], "market": info["market"], "displaySymbol": info["display"], "quote": quote}
+
+
+def normalize_realtime_watch_item(symbol, market=None, meta=None):
+    meta = meta or {}
+    info = normalize_security_symbol(symbol, market)
+    return {
+        "symbol": info["symbol"],
+        "market": info["market"],
+        "displaySymbol": meta.get("displaySymbol") or info["display"],
+        "name": str(meta.get("name") or "").strip(),
+        "updatedAt": pd.Timestamp.now().isoformat(),
+    }
+
+
+def load_realtime_watchlist():
+    if not REALTIME_WATCHLIST_CACHE.exists():
+        return {"current": None, "symbols": []}
+    try:
+        with REALTIME_WATCHLIST_CACHE.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return {"current": None, "symbols": []}
+    if not isinstance(payload, dict):
+        return {"current": None, "symbols": []}
+    symbols = payload.get("symbols")
+    if not isinstance(symbols, list):
+        symbols = []
+    return {
+        "current": payload.get("current") if isinstance(payload.get("current"), dict) else None,
+        "symbols": [item for item in symbols if isinstance(item, dict)],
+    }
+
+
+def save_realtime_watchlist(payload):
+    existing = load_realtime_watchlist()
+    items = []
+    if isinstance(payload, dict) and isinstance(payload.get("symbols"), list):
+        for item in payload.get("symbols"):
+            if not isinstance(item, dict):
+                continue
+            code = row_get(item, "symbol", "stock_code", "code", "instrument")
+            if code:
+                items.append(normalize_realtime_watch_item(code, item.get("market"), item))
+    elif isinstance(payload, dict):
+        code = row_get(payload, "symbol", "stock_code", "code", "instrument")
+        if code:
+            items.append(normalize_realtime_watch_item(code, payload.get("market"), payload))
+    allow_empty = isinstance(payload, dict) and isinstance(payload.get("symbols"), list)
+    if not items and not allow_empty:
+        raise ValueError("symbol is required")
+
+    replace = not isinstance(payload, dict) or payload.get("replace", True)
+    merged = items if replace else items + existing.get("symbols", [])
+    deduped = []
+    seen = set()
+    for item in merged:
+        key = f"{item['market']}:{item['symbol']}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    result = {
+        "current": deduped[0] if deduped else None,
+        "symbols": deduped[:20],
+        "updatedAt": pd.Timestamp.now().isoformat(),
+    }
+    with REALTIME_WATCHLIST_CACHE.open("w", encoding="utf-8") as handle:
+        json.dump(result, handle, ensure_ascii=False, indent=2)
+    return result
+
+
+def remember_realtime_symbol(symbol, market=None, meta=None):
+    try:
+        payload = {"symbol": symbol, "market": market, "replace": True}
+        if meta:
+            payload.update(meta)
+        return save_realtime_watchlist(payload)
+    except Exception:
+        return None
+
+
+def append_realtime_daily(daily, symbol, market=None):
+    quote = realtime_quote(symbol, market).get("quote")
+    if not quote:
+        return daily, None
+    quote_ts = pd.Timestamp(quote["trade_date"])
+    last_ts = daily["date"].max() if not daily.empty else None
+    if last_ts is not None and quote_ts < pd.Timestamp(last_ts):
+        return daily, None
+    row = {
+        "date": quote_ts,
+        "open": quote["open"],
+        "high": quote["high"],
+        "low": quote["low"],
+        "close": quote["close"],
+        "volume": quote.get("volume") or 0,
+        "amount": quote.get("amount") or 0,
+        "turnover": quote.get("turnover"),
+        "market": quote.get("market"),
+        "symbol": quote.get("symbol"),
+        "realtime": True,
+    }
+    result = daily.copy()
+    if last_ts is not None and quote_ts == pd.Timestamp(last_ts):
+        result = result[result["date"] < quote_ts].copy()
+    result = pd.concat([result, pd.DataFrame([row])], ignore_index=True)
+    return result.sort_values("date").reset_index(drop=True), quote
+
+
+def latest_available_trade_day(symbol, market=None):
+    latest = latest_local_trade_day(symbol, market=market)
+    quote = realtime_quote(symbol, market=market).get("quote")
+    if quote:
+        quote_ts = pd.Timestamp(quote["trade_date"])
+        if quote_ts > latest:
+            return quote_ts
+    return latest
+
+
+def local_symbols(include_hk=True):
     with market_db_connect() as conn:
         rows = conn.execute("SELECT symbol FROM daily_prices GROUP BY symbol ORDER BY symbol").fetchall()
-    return [row["symbol"] for row in rows]
+        symbols = [row["symbol"] for row in rows]
+        if include_hk:
+            try:
+                hk_rows = conn.execute("SELECT symbol FROM hk_daily_prices GROUP BY symbol ORDER BY symbol").fetchall()
+                symbols.extend(row["symbol"] for row in hk_rows)
+            except sqlite3.OperationalError:
+                pass
+    return symbols
 
 
 def load_stock_name_index():
@@ -291,17 +795,42 @@ def load_stock_name_index():
     if STOCK_NAME_INDEX.exists():
         with STOCK_NAME_INDEX.open("r", encoding="utf-8") as handle:
             for item in json.load(handle):
-                symbol = str(item.get("symbol", "")).strip().zfill(6)
+                info = normalize_security_symbol(item.get("symbol", ""))
+                symbol = info["symbol"]
                 if symbol not in symbols:
                     continue
+                name = HK_STOCK_NAME_OVERRIDES.get(symbol, "") if info["market"] == "hk" else str(item.get("name", "")).strip()
                 records.append({
                     "symbol": symbol,
-                    "name": str(item.get("name", "")).strip(),
+                    "market": info["market"],
+                    "displaySymbol": info["display"],
+                    "name": name,
                     "initials": str(item.get("initials", "")).strip().upper(),
                 })
-    indexed = {item["symbol"] for item in records}
-    records.extend({"symbol": symbol, "name": "", "initials": ""} for symbol in sorted(symbols - indexed))
+    indexed = {f"{item['market']}:{item['symbol']}" for item in records}
+    records.extend({
+        "symbol": symbol,
+        "market": "hk" if len(symbol) == 5 else "cn",
+        "displaySymbol": f"HK:{symbol}" if len(symbol) == 5 else symbol,
+        "name": HK_STOCK_NAME_OVERRIDES.get(symbol, "") if len(symbol) == 5 else "",
+        "initials": "",
+    } for symbol in sorted(symbols) if f"{'hk' if len(symbol) == 5 else 'cn'}:{symbol}" not in indexed)
     return records
+
+
+def security_display_name(symbol, market=None):
+    info = normalize_security_symbol(symbol, market)
+    if info["market"] == "hk":
+        return HK_STOCK_NAME_OVERRIDES.get(info["symbol"], "")
+    if STOCK_NAME_INDEX.exists():
+        try:
+            with STOCK_NAME_INDEX.open("r", encoding="utf-8") as handle:
+                for item in json.load(handle):
+                    if normalize_security_symbol(item.get("symbol", ""))["symbol"] == info["symbol"]:
+                        return str(item.get("name", "")).strip()
+        except Exception:
+            return ""
+    return ""
 
 
 def search_stock_names(query, limit=20):
@@ -313,10 +842,17 @@ def search_stock_names(query, limit=20):
     matches = []
     for item in records:
         symbol = item["symbol"]
+        display_symbol = item.get("displaySymbol") or symbol
         name = item.get("name") or ""
         initials = item.get("initials") or ""
         score = None
-        if symbol == text.zfill(6) or symbol.startswith(text):
+        try:
+            normalized = normalize_security_symbol(text)
+        except Exception:
+            normalized = None
+        if normalized and item.get("market") == normalized.get("market") and symbol == normalized.get("symbol"):
+            score = 0
+        elif symbol.startswith(text) or display_symbol.upper().startswith(upper):
             score = 0
         elif name == text:
             score = 1
@@ -336,22 +872,86 @@ def search_stock_names(query, limit=20):
     return {"matches": limited, "count": len(matches)}
 
 
-def local_trade_dates(symbol, start_bound, end_bound):
+def stock_name_lookup():
+    lookup = {}
+    for item in load_stock_name_index():
+        key = f"{item.get('market') or 'cn'}:{item.get('symbol')}"
+        lookup[key] = item
+    return lookup
+
+
+def market_watchlist_snapshot(items):
+    names = stock_name_lookup()
+    results = []
+    with market_db_connect() as conn:
+        for item in items or []:
+            raw_symbol = item.get("symbol") if isinstance(item, dict) else item
+            raw_market = item.get("market") if isinstance(item, dict) else None
+            if not raw_symbol:
+                continue
+            info = normalize_security_symbol(raw_symbol, raw_market)
+            conditions = ["symbol = ?"]
+            params = [info["symbol"]]
+            if info["market"] == "hk" and info["raw_code"]:
+                conditions = ["(symbol = ? OR raw_code = ?)"]
+                params = [info["symbol"], info["raw_code"]]
+            rows = conn.execute(
+                f"""
+                SELECT trade_date, close
+                FROM {info['table']}
+                WHERE {' AND '.join(conditions)}
+                ORDER BY trade_date DESC
+                LIMIT 2
+                """,
+                params,
+            ).fetchall()
+            latest = rows[0] if rows else None
+            previous = rows[1] if len(rows) > 1 else None
+            latest_close = safe_float(latest["close"]) if latest else None
+            previous_close = safe_float(previous["close"]) if previous else None
+            change_pct = None
+            if latest_close is not None and previous_close and previous_close > 0:
+                change_pct = (latest_close - previous_close) / previous_close * 100
+            name_item = names.get(f"{info['market']}:{info['symbol']}", {})
+            results.append({
+                "symbol": info["symbol"],
+                "market": info["market"],
+                "displaySymbol": info["display"],
+                "name": (item.get("name") if isinstance(item, dict) else "") or name_item.get("name") or security_display_name(info["symbol"], info["market"]),
+                "initials": name_item.get("initials") or "",
+                "latestDate": latest["trade_date"] if latest else "",
+                "latestClose": latest_close,
+                "previousClose": previous_close,
+                "changePct": change_pct,
+            })
+    return {"items": results}
+
+
+def local_trade_dates(symbol, start_bound, end_bound, market=None):
+    info = normalize_security_symbol(symbol, market)
+    conditions = ["symbol = ?"]
+    params = [info["symbol"]]
+    if info["market"] == "hk" and info["raw_code"]:
+        conditions = ["(symbol = ? OR raw_code = ?)"]
+        params = [info["symbol"], info["raw_code"]]
+    conditions.extend(["trade_date >= ?", "trade_date <= ?"])
+    params.extend([pd.Timestamp(start_bound).strftime("%Y-%m-%d"), pd.Timestamp(end_bound).strftime("%Y-%m-%d")])
     with market_db_connect() as conn:
         rows = conn.execute(
-            """
-            SELECT trade_date FROM daily_prices
-            WHERE symbol = ? AND trade_date >= ? AND trade_date <= ?
+            f"""
+            SELECT trade_date FROM {info['table']}
+            WHERE {' AND '.join(conditions)}
             ORDER BY trade_date
             """,
-            (str(symbol).zfill(6), pd.Timestamp(start_bound).strftime("%Y-%m-%d"), pd.Timestamp(end_bound).strftime("%Y-%m-%d")),
+            params,
         ).fetchall()
     return [pd.Timestamp(row["trade_date"]) for row in rows]
 
 
 def candles_to_records(df):
-    return [
-        {
+    records = []
+    for _, row in df.iterrows():
+        record = {
             "date": row["date"].strftime("%Y-%m-%d"),
             "open": round(float(row["open"]), 3),
             "high": round(float(row["high"]), 3),
@@ -359,8 +959,29 @@ def candles_to_records(df):
             "close": round(float(row["close"]), 3),
             "volume": round(float(row.get("volume", 0)), 3),
         }
-        for _, row in df.iterrows()
-    ]
+        if bool(row.get("realtime", False)):
+            record["realtime"] = True
+        records.append(record)
+    return records
+
+
+def minute_candles_to_records(df):
+    records = []
+    for _, row in df.iterrows():
+        date_value = pd.Timestamp(row["date"])
+        trade_date = str(row.get("tradeDate") or date_value.strftime("%Y-%m-%d"))
+        records.append({
+            "date": date_value.strftime("%Y-%m-%d %H:%M"),
+            "tradeDate": trade_date,
+            "time": date_value.strftime("%H:%M"),
+            "open": round(float(row["open"]), 3),
+            "high": round(float(row["high"]), 3),
+            "low": round(float(row["low"]), 3),
+            "close": round(float(row["close"]), 3),
+            "volume": round(float(row.get("volume", 0)), 3),
+            "amount": round(float(row.get("amount", 0)), 3),
+        })
+    return records
 
 
 def fetch_direct_fallback(symbol, start_ts, analysis_ts, period):
@@ -485,20 +1106,45 @@ def fetch_cached(fetcher, symbol, start_ts, analysis_ts, period, label, anchor_t
     raise ValueError(f"{label}数据不覆盖目标日期。")
 
 
-def fetch_market_data(symbol, analysis_ts, years=3):
+def fetch_market_data(symbol, analysis_ts, years=3, market=None, include_realtime=False):
     start_ts = analysis_ts - pd.DateOffset(years=years + 1)
-    daily_df = load_local_daily(symbol, start_ts, analysis_ts)
+    daily_df = load_local_daily(symbol, start_ts, analysis_ts, market=market)
+    if include_realtime:
+        daily_df, _ = append_realtime_daily(daily_df, symbol, market=market)
+    daily_df = daily_df[daily_df["date"] <= pd.Timestamp(analysis_ts)].copy().reset_index(drop=True)
     weekly_df = daily_to_weekly(daily_df)
     return daily_df, weekly_df
 
 
-def trade_replay_payload(symbol, start_date, lookback=700, fresh=False):
+def trade_replay_payload(symbol, start_date, lookback=700, fresh=False, market=None, include_realtime=False):
+    info = normalize_security_symbol(symbol, market)
     start_ts = parse_date(start_date)
-    fetch_end = previous_trading_day()
-    daily = load_local_daily(symbol, None, fetch_end)
+    fetch_end = latest_local_trade_day(info["symbol"], market=info["market"])
+    daily = load_local_daily(info["symbol"], None, fetch_end, market=info["market"])
+    realtime = None
+    if include_realtime:
+        daily, realtime = append_realtime_daily(daily, info["symbol"], info["market"])
     daily = daily[daily["date"] <= fetch_end].copy().reset_index(drop=True)
+    if realtime:
+        realtime_ts = pd.Timestamp(realtime["trade_date"])
+        if realtime_ts > fetch_end:
+            quote_row = {
+                "date": realtime_ts,
+                "open": realtime["open"],
+                "high": realtime["high"],
+                "low": realtime["low"],
+                "close": realtime["close"],
+                "volume": realtime.get("volume") or 0,
+                "amount": realtime.get("amount") or 0,
+                "turnover": realtime.get("turnover"),
+                "market": realtime.get("market"),
+                "symbol": realtime.get("symbol"),
+                "realtime": True,
+            }
+            daily = pd.concat([daily, pd.DataFrame([quote_row])], ignore_index=True)
+            daily = daily.sort_values("date").reset_index(drop=True)
     if daily.empty:
-        raise ValueError(f"No daily data for {symbol}.")
+        raise ValueError(f"No daily data for {info['display']}.")
     candidates = daily[daily["date"] <= start_ts]
     if candidates.empty:
         raise ValueError("Start date is earlier than available market data.")
@@ -509,8 +1155,16 @@ def trade_replay_payload(symbol, start_date, lookback=700, fresh=False):
     future = daily.iloc[cursor + 1:].copy()
     replay_daily = pd.concat([history, future], ignore_index=True)
     cursor = len(history) - 1
+    minute_start = replay_daily.iloc[0]["date"] if not replay_daily.empty else start_ts
+    minute_end = replay_daily.iloc[-1]["date"] if not replay_daily.empty else fetch_end
+    minute_5m = load_local_minute(info["symbol"], minute_start, minute_end, market=info["market"], period="5m")
+    minute_30m = aggregate_minute_bars(minute_5m, 6)
+    minute_60m = aggregate_minute_bars(minute_5m, 12)
     return {
-        "symbol": symbol,
+        "symbol": info["symbol"],
+        "market": info["market"],
+        "displaySymbol": info["display"],
+        "name": security_display_name(info["symbol"], info["market"]),
         "startDate": replay_daily.iloc[cursor]["date"].strftime("%Y-%m-%d"),
         "cursor": cursor,
         "position": None,
@@ -523,6 +1177,9 @@ def trade_replay_payload(symbol, start_date, lookback=700, fresh=False):
             "daily": candles_to_records(replay_daily),
             "weekly": candles_to_records(daily_to_weekly(replay_daily)),
             "monthly": candles_to_records(daily_to_monthly(replay_daily)),
+            "5m": minute_candles_to_records(minute_5m),
+            "30m": minute_candles_to_records(minute_30m),
+            "60m": minute_candles_to_records(minute_60m),
         },
     }
 
@@ -573,9 +1230,15 @@ def trade_replay_datasets():
     for record in records:
         session_id = record.get("sessionId") or f"legacy:{record.get('symbol', '')}:{record.get('trainingStartDate') or record.get('date', '')}"
         if session_id not in groups:
+            try:
+                info = normalize_security_symbol(record.get("symbol"), record.get("market"))
+            except Exception:
+                info = {"symbol": record.get("symbol"), "market": record.get("market") or "cn", "display": record.get("displaySymbol") or record.get("symbol")}
             groups[session_id] = {
                 "id": session_id,
-                "symbol": record.get("symbol"),
+                "symbol": info["symbol"],
+                "market": info["market"],
+                "displaySymbol": info["display"],
                 "startDate": record.get("trainingStartDate") or record.get("date"),
                 "endDate": record.get("date"),
                 "savedAt": record.get("savedAt"),
@@ -641,28 +1304,36 @@ def trade_replay_timing_quality():
 
     by_symbol = {}
     for record in buys:
-        symbol = str(record.get("symbol") or "").strip().zfill(6)
-        if not symbol:
+        try:
+            info = normalize_security_symbol(record.get("symbol"), record.get("market"))
+        except Exception:
             continue
-        by_symbol.setdefault(symbol, []).append(record)
+        key = f"{info['market']}:{info['symbol']}"
+        by_symbol.setdefault(key, {"info": info, "records": []})["records"].append(record)
 
     dataframes = {}
     errors = []
-    for symbol, symbol_records in by_symbol.items():
+    for key, group in by_symbol.items():
+        info = group["info"]
+        symbol_records = group["records"]
         dates = [parse_date(record.get("date")) for record in symbol_records if record.get("date")]
         if not dates:
             continue
         start_ts = min(dates) - pd.DateOffset(days=260)
         end_ts = max(dates) + pd.DateOffset(days=120)
         try:
-            dataframes[symbol] = load_local_daily(symbol, start_ts, end_ts)
+            dataframes[key] = load_local_daily(info["symbol"], start_ts, end_ts, market=info["market"])
         except Exception as exc:
-            errors.append({"symbol": symbol, "error": str(exc)})
+            errors.append({"symbol": info["display"], "error": str(exc)})
 
     items = []
     for record in buys:
-        symbol = str(record.get("symbol") or "").strip().zfill(6)
-        df = dataframes.get(symbol)
+        try:
+            info = normalize_security_symbol(record.get("symbol"), record.get("market"))
+        except Exception:
+            continue
+        key = f"{info['market']}:{info['symbol']}"
+        df = dataframes.get(key)
         entry_price = safe_number(record.get("price"), 0)
         if df is None or df.empty or entry_price <= 0 or not record.get("date"):
             continue
@@ -681,7 +1352,9 @@ def trade_replay_timing_quality():
         mfe = pct_change(high20, entry_price)
         mae = pct_change(low20, entry_price)
         item = {
-            "symbol": symbol,
+            "symbol": info["symbol"],
+            "market": info["market"],
+            "displaySymbol": info["display"],
             "date": record.get("date"),
             "entryPrice": round(entry_price, 3),
             "stopLoss": round(stop_loss, 3) if stop_loss is not None else None,
@@ -1149,9 +1822,16 @@ def evaluate_buy_models(daily_df, trend, phase, support, resistance):
     }
 
 
-def buy_analysis(symbol, analysis_date, corrections):
+def buy_analysis(symbol, analysis_date, corrections, market=None, include_realtime=False):
     analysis_ts = parse_date(analysis_date)
-    daily_df, weekly_df = fetch_market_data(symbol, analysis_ts, years=3)
+    info = normalize_security_symbol(symbol, market)
+    daily_df, weekly_df = fetch_market_data(
+        info["symbol"],
+        analysis_ts,
+        years=3,
+        market=info["market"],
+        include_realtime=include_realtime,
+    )
     daily_window = latest_window(daily_df, analysis_ts)
     weekly_window = weekly_df[weekly_df["date"] <= analysis_ts].copy().reset_index(drop=True)
     sr_date = (analysis_ts + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
@@ -1177,7 +1857,10 @@ def buy_analysis(symbol, analysis_date, corrections):
     phase = detect_phase(daily_window, weekly_window, trend)
     model = evaluate_buy_models(daily_window, trend, phase, nearest["support"], nearest["resistance"])
     return {
-        "symbol": symbol,
+        "symbol": info["symbol"],
+        "market": info["market"],
+        "displaySymbol": info["display"],
+        "name": security_display_name(info["symbol"], info["market"]),
         "analysisDate": analysis_date,
         "currentPrice": round(current_price, 3),
         "trend": trend,
@@ -1266,7 +1949,7 @@ def random_local_training_sample(start_bound, end_bound, min_history=700, symbol
     with market_db_connect() as conn:
         rows = conn.execute(
             """
-            SELECT symbol
+            SELECT symbol, 'cn' AS market
             FROM daily_prices
             WHERE trade_date <= ?
             GROUP BY symbol
@@ -1277,10 +1960,12 @@ def random_local_training_sample(start_bound, end_bound, min_history=700, symbol
         ).fetchall()
         for row in rows:
             symbol = row["symbol"]
+            market = row["market"]
+            table = "hk_daily_prices" if market == "hk" else "daily_prices"
             dates = conn.execute(
-                """
+                f"""
                 SELECT trade_date
-                FROM daily_prices
+                FROM {table}
                 WHERE symbol = ? AND trade_date >= ? AND trade_date <= ?
                 ORDER BY trade_date
                 """,
@@ -1291,7 +1976,7 @@ def random_local_training_sample(start_bound, end_bound, min_history=700, symbol
                 continue
             if len(date_values) >= int(min_history):
                 date_values = date_values[int(min_history) - 1:]
-            return symbol, random.choice(date_values)
+            return normalize_security_symbol(symbol, market), random.choice(date_values)
     return None, None
 
 
@@ -1329,6 +2014,12 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/trade-replay-timing-quality":
             self.write_json(200, trade_replay_timing_quality())
             return
+        if parsed.path == "/api/realtime-quote":
+            self.handle_get_realtime_quote(parsed)
+            return
+        if parsed.path == "/api/realtime-watchlist":
+            self.write_json(200, load_realtime_watchlist())
+            return
         super().do_GET()
 
     def do_POST(self):
@@ -1351,6 +2042,15 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/delete-trade-replay-record":
             self.handle_delete_trade_replay_record()
             return
+        if parsed.path == "/api/realtime-quote":
+            self.handle_realtime_quote()
+            return
+        if parsed.path == "/api/realtime-watchlist":
+            self.handle_realtime_watchlist()
+            return
+        if parsed.path == "/api/market-watchlist-snapshot":
+            self.handle_market_watchlist_snapshot()
+            return
         self.send_error(404, "Not found")
 
     def read_json_payload(self):
@@ -1364,13 +2064,15 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
             analysis_date = str(payload.get("date", "")).strip()
             if not symbol:
                 raise ValueError("symbol is required")
+            include_realtime = bool(payload.get("includeRealtime"))
             if not analysis_date:
-                analysis_date = previous_trading_day().strftime("%Y-%m-%d")
+                latest_day = latest_available_trade_day(symbol, market=payload.get("market")) if include_realtime else latest_local_trade_day(symbol, market=payload.get("market"))
+                analysis_date = latest_day.strftime("%Y-%m-%d")
             corrections = {
                 "support": float(payload.get("supportCorrection") or 0),
                 "resistance": float(payload.get("resistanceCorrection") or 0),
             }
-            self.write_json(200, buy_analysis(symbol, analysis_date, corrections))
+            self.write_json(200, buy_analysis(symbol, analysis_date, corrections, market=payload.get("market"), include_realtime=include_realtime))
         except Exception as exc:
             self.write_json(400, {"error": str(exc)})
 
@@ -1382,11 +2084,13 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
             if not symbol:
                 raise ValueError("symbol is required")
             if not analysis_date:
-                analysis_date = previous_trading_day().strftime("%Y-%m-%d")
+                analysis_date = latest_local_trade_day(symbol, market=payload.get("market")).strftime("%Y-%m-%d")
 
             analysis_ts = parse_date(analysis_date)
             years = int(payload.get("years", 3))
-            daily_df, df = fetch_market_data(symbol, analysis_ts, years=years)
+            market = payload.get("market")
+            info = normalize_security_symbol(symbol, market)
+            daily_df, df = fetch_market_data(info["symbol"], analysis_ts, years=years, market=info["market"])
             if df.empty:
                 raise ValueError(f"AKShare did not return weekly data for {symbol}. Check the stock code and date.")
             result = analyze(
@@ -1400,6 +2104,9 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
                 reaction_pct=float(payload.get("reactionPct", 0.03)),
                 daily_df=daily_df,
             )
+            result["symbol"] = info["symbol"]
+            result["market"] = info["market"]
+            result["displaySymbol"] = info["display"]
             self.write_json(200, result)
         except Exception as exc:
             self.write_json(400, {"error": str(exc)})
@@ -1411,11 +2118,13 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
             start_date = str(payload.get("date", "")).strip()
             if not symbol:
                 raise ValueError("symbol is required")
+            include_realtime = bool(payload.get("includeRealtime"))
             if not start_date:
-                start_date = previous_trading_day().strftime("%Y-%m-%d")
+                latest_day = latest_available_trade_day(symbol, market=payload.get("market")) if include_realtime else latest_local_trade_day(symbol, market=payload.get("market"))
+                start_date = latest_day.strftime("%Y-%m-%d")
             lookback = int(payload.get("lookback", 700))
             fresh = bool(payload.get("fresh"))
-            self.write_json(200, trade_replay_payload(symbol, start_date, lookback=lookback, fresh=fresh))
+            self.write_json(200, trade_replay_payload(symbol, start_date, lookback=lookback, fresh=fresh, market=payload.get("market"), include_realtime=include_realtime))
         except Exception as exc:
             self.write_json(400, {"error": str(exc)})
 
@@ -1440,21 +2149,56 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
         except Exception as exc:
             self.write_json(400, {"error": str(exc)})
 
+    def handle_get_realtime_quote(self, parsed):
+        try:
+            params = parse_qs(parsed.query)
+            symbol = (params.get("symbol") or [""])[0]
+            market = (params.get("market") or [None])[0]
+            if symbol:
+                self.write_json(200, realtime_quote(symbol, market=market))
+            else:
+                self.write_json(200, {"quotes": load_realtime_quotes()})
+        except Exception as exc:
+            self.write_json(400, {"error": str(exc)})
+
+    def handle_realtime_quote(self):
+        try:
+            payload = self.read_json_payload()
+            self.write_json(200, save_realtime_payload(payload))
+        except Exception as exc:
+            self.write_json(400, {"error": str(exc)})
+
+    def handle_realtime_watchlist(self):
+        try:
+            payload = self.read_json_payload()
+            self.write_json(200, save_realtime_watchlist(payload))
+        except Exception as exc:
+            self.write_json(400, {"error": str(exc)})
+
+    def handle_market_watchlist_snapshot(self):
+        try:
+            payload = self.read_json_payload()
+            self.write_json(200, market_watchlist_snapshot(payload.get("symbols") or payload.get("items") or []))
+        except Exception as exc:
+            self.write_json(400, {"error": str(exc)})
+
     def random_training_sample(self):
         start_bound = pd.Timestamp("2010-01-01")
         one_year_ago = pd.Timestamp.now().normalize() - pd.DateOffset(years=1)
         end = min(pd.Timestamp("2026-06-01"), one_year_ago)
         if end < start_bound:
             raise ValueError("随机盲训没有满足距离当前日期1年以上的可用日期。")
-        symbol, random_day = random_local_training_sample(start_bound, end)
-        if symbol and random_day:
+        info, random_day = random_local_training_sample(start_bound, end)
+        if info and random_day:
             return {
-                "symbol": symbol,
+                "symbol": info["symbol"],
+                "market": info["market"],
+                "displaySymbol": info["display"],
                 "date": pd.Timestamp(random_day).strftime("%Y-%m-%d"),
                 "fresh": False,
                 "dataSource": "local_sqlite",
             }
-        symbols = local_symbols()
+        symbols = local_symbols(include_hk=False)
         if not symbols:
             raise ValueError("本地行情数据库没有可用于随机盲训的股票。")
         random.shuffle(symbols)
@@ -1465,8 +2209,11 @@ class TradingAdviceHandler(SimpleHTTPRequestHandler):
             if len(dates) >= 700:
                 dates = dates[699:]
             random_day = random.choice(dates)
+            info = normalize_security_symbol(symbol)
             return {
-                "symbol": symbol,
+                "symbol": info["symbol"],
+                "market": info["market"],
+                "displaySymbol": info["display"],
                 "date": pd.Timestamp(random_day).strftime("%Y-%m-%d"),
                 "fresh": False,
                 "dataSource": "local_sqlite",

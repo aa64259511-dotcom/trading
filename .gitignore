@@ -3,6 +3,11 @@ __pycache__/
 data_cache/
 *.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.log
 qmt_export/
 _qmt_import_test.*
 thinktrader_stock_doc.html
+realtime_quotes.json
+realtime_watchlist.json
