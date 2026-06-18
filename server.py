@@ -362,6 +362,17 @@ def normalize_security_symbol(symbol, market=None):
             "table": "hk_daily_prices",
         }
 
+    explicit_futures = market_hint in {"future", "futures", "fut", "ds", "??"}
+    if explicit_futures or raw_code or not code.isdigit():
+        futures_symbol = code.upper()
+        return {
+            "market": "futures",
+            "symbol": futures_symbol,
+            "raw_code": raw_code or futures_symbol,
+            "display": f"FUT:{futures_symbol}",
+            "table": "futures_daily_prices",
+        }
+
     cn_symbol = code.zfill(6) if code.isdigit() else code
     return {
         "market": "cn",
@@ -376,7 +387,7 @@ def load_local_daily(symbol, start_ts=None, end_ts=None, market=None):
     info = normalize_security_symbol(symbol, market)
     conditions = ["symbol = ?"]
     params = [info["symbol"]]
-    if info["market"] == "hk" and info["raw_code"]:
+    if info["market"] in {"hk", "futures"} and info["raw_code"]:
         conditions = ["(symbol = ? OR raw_code = ?)"]
         params = [info["symbol"], info["raw_code"]]
     if start_ts is not None:
@@ -467,7 +478,7 @@ def latest_local_trade_day(symbol, market=None):
     info = normalize_security_symbol(symbol, market)
     conditions = ["symbol = ?"]
     params = [info["symbol"]]
-    if info["market"] == "hk" and info["raw_code"]:
+    if info["market"] in {"hk", "futures"} and info["raw_code"]:
         conditions = ["(symbol = ? OR raw_code = ?)"]
         params = [info["symbol"], info["raw_code"]]
     with market_db_connect() as conn:
@@ -673,20 +684,21 @@ def normalize_realtime_watch_item(symbol, market=None, meta=None):
 
 def load_realtime_watchlist():
     if not REALTIME_WATCHLIST_CACHE.exists():
-        return {"current": None, "symbols": []}
+        return {"current": None, "symbols": [], "updatedAt": None}
     try:
         with REALTIME_WATCHLIST_CACHE.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
     except Exception:
-        return {"current": None, "symbols": []}
+        return {"current": None, "symbols": [], "updatedAt": None}
     if not isinstance(payload, dict):
-        return {"current": None, "symbols": []}
+        return {"current": None, "symbols": [], "updatedAt": None}
     symbols = payload.get("symbols")
     if not isinstance(symbols, list):
         symbols = []
     return {
         "current": payload.get("current") if isinstance(payload.get("current"), dict) else None,
         "symbols": [item for item in symbols if isinstance(item, dict)],
+        "updatedAt": payload.get("updatedAt"),
     }
 
 
@@ -776,28 +788,33 @@ def latest_available_trade_day(symbol, market=None):
     return latest
 
 
-def local_symbols(include_hk=True):
+def local_symbols(include_hk=True, include_market=False):
     with market_db_connect() as conn:
-        rows = conn.execute("SELECT symbol FROM daily_prices GROUP BY symbol ORDER BY symbol").fetchall()
-        symbols = [row["symbol"] for row in rows]
+        rows = conn.execute("SELECT symbol, 'cn' AS market FROM daily_prices GROUP BY symbol ORDER BY symbol").fetchall()
+        symbols = [(row["symbol"], row["market"]) for row in rows]
         if include_hk:
             try:
-                hk_rows = conn.execute("SELECT symbol FROM hk_daily_prices GROUP BY symbol ORDER BY symbol").fetchall()
-                symbols.extend(row["symbol"] for row in hk_rows)
+                hk_rows = conn.execute("SELECT symbol, 'hk' AS market FROM hk_daily_prices GROUP BY symbol ORDER BY symbol").fetchall()
+                symbols.extend((row["symbol"], row["market"]) for row in hk_rows)
             except sqlite3.OperationalError:
                 pass
-    return symbols
+        try:
+            fut_rows = conn.execute("SELECT symbol, 'futures' AS market FROM futures_daily_prices GROUP BY symbol ORDER BY symbol").fetchall()
+            symbols.extend((row["symbol"], row["market"]) for row in fut_rows)
+        except sqlite3.OperationalError:
+            pass
+    return symbols if include_market else [symbol for symbol, _market in symbols]
 
 
 def load_stock_name_index():
-    symbols = set(local_symbols())
+    symbols = set(local_symbols(include_market=True))
     records = []
     if STOCK_NAME_INDEX.exists():
         with STOCK_NAME_INDEX.open("r", encoding="utf-8") as handle:
             for item in json.load(handle):
                 info = normalize_security_symbol(item.get("symbol", ""))
                 symbol = info["symbol"]
-                if symbol not in symbols:
+                if (symbol, info["market"]) not in symbols:
                     continue
                 name = HK_STOCK_NAME_OVERRIDES.get(symbol, "") if info["market"] == "hk" else str(item.get("name", "")).strip()
                 records.append({
@@ -810,11 +827,11 @@ def load_stock_name_index():
     indexed = {f"{item['market']}:{item['symbol']}" for item in records}
     records.extend({
         "symbol": symbol,
-        "market": "hk" if len(symbol) == 5 else "cn",
-        "displaySymbol": f"HK:{symbol}" if len(symbol) == 5 else symbol,
-        "name": HK_STOCK_NAME_OVERRIDES.get(symbol, "") if len(symbol) == 5 else "",
+        "market": market,
+        "displaySymbol": f"HK:{symbol}" if market == "hk" else (f"FUT:{symbol}" if market == "futures" else symbol),
+        "name": HK_STOCK_NAME_OVERRIDES.get(symbol, "") if market == "hk" else "",
         "initials": "",
-    } for symbol in sorted(symbols) if f"{'hk' if len(symbol) == 5 else 'cn'}:{symbol}" not in indexed)
+    } for symbol, market in sorted(symbols) if f"{market}:{symbol}" not in indexed)
     return records
 
 
@@ -826,7 +843,8 @@ def security_display_name(symbol, market=None):
         try:
             with STOCK_NAME_INDEX.open("r", encoding="utf-8") as handle:
                 for item in json.load(handle):
-                    if normalize_security_symbol(item.get("symbol", ""))["symbol"] == info["symbol"]:
+                    item_info = normalize_security_symbol(item.get("symbol", ""))
+                    if item_info["symbol"] == info["symbol"] and item_info["market"] == info["market"]:
                         return str(item.get("name", "")).strip()
         except Exception:
             return ""
@@ -892,7 +910,7 @@ def market_watchlist_snapshot(items):
             info = normalize_security_symbol(raw_symbol, raw_market)
             conditions = ["symbol = ?"]
             params = [info["symbol"]]
-            if info["market"] == "hk" and info["raw_code"]:
+            if info["market"] in {"hk", "futures"} and info["raw_code"]:
                 conditions = ["(symbol = ? OR raw_code = ?)"]
                 params = [info["symbol"], info["raw_code"]]
             rows = conn.execute(
@@ -909,6 +927,19 @@ def market_watchlist_snapshot(items):
             previous = rows[1] if len(rows) > 1 else None
             latest_close = safe_float(latest["close"]) if latest else None
             previous_close = safe_float(previous["close"]) if previous else None
+            latest_date = latest["trade_date"] if latest else ""
+            quote = realtime_quote(info["symbol"], info["market"]).get("quote")
+            latest_source = "local"
+            latest_time = None
+            if quote and quote.get("close") is not None:
+                quote_date_text = str(quote.get("trade_date") or "")
+                if not latest_date or quote_date_text >= str(latest_date):
+                    if latest_close is not None and quote_date_text != str(latest_date):
+                        previous_close = latest_close
+                    latest_close = safe_float(quote.get("close"))
+                    latest_date = quote_date_text or latest_date
+                    latest_source = "qmt_realtime"
+                    latest_time = quote.get("receivedAt")
             change_pct = None
             if latest_close is not None and previous_close and previous_close > 0:
                 change_pct = (latest_close - previous_close) / previous_close * 100
@@ -919,7 +950,9 @@ def market_watchlist_snapshot(items):
                 "displaySymbol": info["display"],
                 "name": (item.get("name") if isinstance(item, dict) else "") or name_item.get("name") or security_display_name(info["symbol"], info["market"]),
                 "initials": name_item.get("initials") or "",
-                "latestDate": latest["trade_date"] if latest else "",
+                "latestDate": latest_date,
+                "latestTime": latest_time,
+                "latestSource": latest_source,
                 "latestClose": latest_close,
                 "previousClose": previous_close,
                 "changePct": change_pct,
@@ -931,7 +964,7 @@ def local_trade_dates(symbol, start_bound, end_bound, market=None):
     info = normalize_security_symbol(symbol, market)
     conditions = ["symbol = ?"]
     params = [info["symbol"]]
-    if info["market"] == "hk" and info["raw_code"]:
+    if info["market"] in {"hk", "futures"} and info["raw_code"]:
         conditions = ["(symbol = ? OR raw_code = ?)"]
         params = [info["symbol"], info["raw_code"]]
     conditions.extend(["trade_date >= ?", "trade_date <= ?"])

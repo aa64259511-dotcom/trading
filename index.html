@@ -3,16 +3,16 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI交易提款机</title>
-    <link rel="stylesheet" href="styles.css?v=20260617-hk-name-title" />
+    <title>AI交易工作台</title>
+    <link rel="stylesheet" href="styles.css?v=20260618-watch-realtime-price" />
   </head>
   <body>
     <main class="app-shell">
-      <section class="workspace" aria-label="AI交易提款机工作台">
+      <section class="workspace" aria-label="AI交易工作台">
         <header class="topbar">
           <div>
             <p class="eyebrow">Trade Mind Trainer</p>
-            <h1>AI交易提款机</h1>
+            <h1>AI交易工作台</h1>
           </div>
           <div class="market-pulse" aria-label="市场状态">
             <span class="pulse-dot"></span>
@@ -20,8 +20,8 @@
           </div>
         </header>
         <nav class="mode-tabs" aria-label="&#27169;&#22359;&#20999;&#25442;">
-          <button class="tab-button" type="button" data-view="market">&#34892;&#24773;</button>
-          <button class="tab-button active" type="button" data-view="replay">&#20132;&#26131;&#35757;&#32451;</button>
+          <button class="tab-button hidden" type="button" data-view="market" aria-hidden="true" tabindex="-1">&#34892;&#24773;</button>
+          <button class="tab-button active" type="button" data-view="replay">&#34892;&#24773;&#19982;&#35757;&#32451;</button>
           <button class="tab-button" type="button" data-view="backtest">AI&#24314;&#35758;&#22238;&#27979;</button>
           <button class="tab-button" type="button" data-view="dataset">&#35757;&#32451;&#38598;&#31649;&#29702;</button>
         </nav>
@@ -116,6 +116,23 @@
                     </div>
                     <strong id="marketAiPhase" class="hidden">--</strong>
                     <strong id="marketAiModel" class="hidden">--</strong>
+                  </section>
+                  <section class="market-position-card" id="marketPositionCard">
+                    <div class="market-position-head">
+                      <div>
+                        <h3>&#24403;&#21069;&#29366;&#24577;</h3>
+                        <p id="marketPositionSummary">&#26410;&#25345;&#20179;</p>
+                      </div>
+                    </div>
+                    <div class="market-position-toggle" role="radiogroup" aria-label="&#25345;&#20179;&#29366;&#24577;">
+                      <label><input type="radio" name="marketPositionStatus" value="flat" checked />&#26410;&#25345;&#20179;</label>
+                      <label><input type="radio" name="marketPositionStatus" value="held" />&#24050;&#25345;&#20179;</label>
+                    </div>
+                    <div class="market-position-fields hidden" id="marketPositionFields">
+                      <label>&#20080;&#20837;&#26085;&#26399; <input id="marketEntryDate" type="date" /></label>
+                      <label>&#20080;&#20837;&#20215;&#26684; <input id="marketEntryPrice" type="number" min="0" step="0.01" placeholder="0.00" /></label>
+                      <label>&#27490;&#25439;&#20215;&#26684; <input id="marketStopLoss" type="number" min="0" step="0.01" placeholder="0.00" /></label>
+                    </div>
                   </section>
                 </aside>
               </div>
@@ -271,7 +288,18 @@
         </section>
 
         <section class="replay-view" id="replayView">
+          <button class="secondary-button replay-expand-watchlist hidden" id="expandTrainingWatchlist" type="button">&#23637;&#24320;&#33258;&#36873;</button>
           <div class="replay-layout">
+            <aside class="training-watchlist-panel" id="trainingWatchlistPanel">
+              <div class="training-watchlist-head">
+                <div>
+                  <h3>&#33258;&#36873;&#32929;</h3>
+                  <small id="trainingWatchlistCount">0 &#21482;</small>
+                </div>
+                <button class="text-button" id="toggleTrainingWatchlist" type="button" aria-expanded="true">&#25910;&#36215;</button>
+              </div>
+              <div class="watchlist training-watchlist" id="trainingWatchlist"></div>
+            </aside>
             <form class="replay-form" id="replayForm">
               <div class="replay-topbar">
                 <div>
@@ -282,11 +310,11 @@
 
               <div class="replay-fetch-row">
                 <label class="stock-search-label">股票名称/首字母 <input id="replayStockSearch" type="text" placeholder="如：赣锋锂业 / GFLY / 00700" autocomplete="off" /><div class="stock-search-results hidden" id="stockSearchResults"></div></label>
-                <label>股票代码 <input id="replaySymbol" type="text" value="002460" placeholder="A股6位 / 港股5位" autocomplete="off" /><strong class="blind-value hidden" id="blindSymbol">已隐藏</strong></label>
+                <label>股票代码 <input id="replaySymbol" type="text" value="002460" placeholder="A&#32929;6&#20301; / &#28207;&#32929;5&#20301; / &#26399;&#36135;&#20195;&#30721;" autocomplete="off" /><strong class="blind-value hidden" id="blindSymbol">已隐藏</strong></label>
                 <label>开始日期 <input id="replayDate" type="date" /><strong class="blind-value hidden" id="blindDate">已隐藏</strong></label>
                 <button class="primary-button" id="startReplay" type="button">开始训练</button>
                 <button class="secondary-button" id="startBlindReplay" type="button">随机盲训</button>
-                <button class="secondary-button write-toggle" id="replayWriteToggle" type="button" aria-pressed="true">真实训练</button>
+                <button class="secondary-button write-toggle" id="replayWriteToggle" type="button" aria-pressed="false">&#34892;&#24773;&#27169;&#24335;</button>
                 <button class="secondary-button hidden" id="revealReplayIdentity" type="button">显示股票和日期</button>
               </div>
 
@@ -308,8 +336,7 @@
                       <button class="secondary-button level-tool" id="drawLevelLine" type="button">画支撑压力线</button>
                       <button class="secondary-button" id="clearLevelLines" type="button">清空线</button>
                       <button class="secondary-button" id="saveLevelTrainingSample" type="button">保存画线训练样本</button>
-                      <span id="levelTrainingCount">0 条修正</span>
-                      <span id="activeLevelInfo">正常浏览：可拖动画布、上下键缩放</span>
+                      <button class="secondary-button" id="replayAddWatch" type="button">&#21152;&#20837;&#33258;&#36873;</button>
                       </div>
                     <div class="timeframe-tabs" role="tablist" aria-label="K line timeframe">
                       <button class="timeframe-button active" type="button" data-frame="daily">&#26085;&#32447;</button>
@@ -356,6 +383,24 @@
                       </div>
                     </div>
                     <div class="rule-advice-body" id="ruleAdviceBody">开始训练后，根据AI建议识别当前是否接近交易模型。</div>
+                  </section>
+
+                  <section class="market-position-card hidden" id="replayPositionCard">
+                    <div class="market-position-head">
+                      <div>
+                        <h3>&#24403;&#21069;&#29366;&#24577;</h3>
+                        <p id="replayPositionSummary">&#26410;&#25345;&#20179;</p>
+                      </div>
+                    </div>
+                    <div class="market-position-toggle" role="radiogroup" aria-label="&#25345;&#20179;&#29366;&#24577;">
+                      <label><input type="radio" name="replayPositionStatus" value="flat" checked />&#26410;&#25345;&#20179;</label>
+                      <label><input type="radio" name="replayPositionStatus" value="held" />&#24050;&#25345;&#20179;</label>
+                    </div>
+                    <div class="market-position-fields hidden" id="replayPositionFields">
+                      <label>&#20080;&#20837;&#26085;&#26399; <input id="replayEntryDateInput" type="date" /></label>
+                      <label>&#20080;&#20837;&#20215;&#26684; <input id="replayEntryPriceInput" type="number" min="0" step="0.01" placeholder="0.00" /></label>
+                      <label>&#27490;&#25439;&#20215;&#26684; <input id="replayStopLossInput" type="number" min="0" step="0.01" placeholder="0.00" /></label>
+                    </div>
                   </section>
 
                   <section class="ai-feedback-panel hidden" id="aiFeedbackPanel">
@@ -525,6 +570,6 @@
       </section>
     </main>
 
-    <script src="app.js?v=20260617-hk-name-title"></script>
+    <script src="app.js?v=20260618-watch-realtime-price"></script>
   </body>
 </html>

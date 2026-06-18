@@ -39,6 +39,7 @@ let lastBuyAnalysis = null;
 let stockSearchTimer = null;
 let marketSearchTimer = null;
 let marketRealtimeTimer = null;
+let marketWatchlistSnapshotTimer = null;
 let marketState = {
   data: null,
   market: "",
@@ -46,7 +47,9 @@ let marketState = {
   displaySymbol: "",
   name: "",
   realtimeQuote: null,
+  realtimeWatchStatus: null,
   watchlist: [],
+  position: { status: "flat", entryDate: "", entryPrice: null },
   manualLevels: [],
   frame: "daily",
   visibleCount: 180,
@@ -93,6 +96,7 @@ let replayState = {
   frame: "daily",
   cursor: 0,
   position: null,
+  marketPosition: { status: "flat", entryDate: "", entryPrice: null, stopLoss: null },
   equity: 1,
   log: [],
   visibleCount: 700,
@@ -104,7 +108,7 @@ let replayState = {
   dragStartOffset: 0,
   dragMoved: false,
   selectedNoteDate: null,
-  writeTraining: true,
+  writeTraining: false,
   blindMode: false,
   blindSymbol: "",
   blindDate: "",
@@ -786,10 +790,14 @@ function replayActionLabel(action) {
 function updateReplayWriteToggle() {
   const button = document.querySelector("#replayWriteToggle");
   if (!button) return;
-  button.textContent = replayState.writeTraining ? "真实训练" : "测试训练";
+  button.textContent = replayState.writeTraining ? "\u8bad\u7ec3\u6a21\u5f0f" : "\u884c\u60c5\u6a21\u5f0f";
   button.setAttribute("aria-pressed", replayState.writeTraining ? "true" : "false");
   button.classList.toggle("active", replayState.writeTraining);
+  document.querySelector(".decision-actions")?.classList.toggle("hidden", !replayState.writeTraining);
+  document.querySelector("#replayPositionCard")?.classList.toggle("hidden", replayState.writeTraining);
+  if (!replayState.writeTraining) document.querySelector("#aiFeedbackPanel")?.classList.add("hidden");
 }
+
 
 function updateReplayBlindUi() {
   const searchInput = document.querySelector("#replayStockSearch");
@@ -833,15 +841,30 @@ async function revealReplayIdentity() {
 
 function toggleReplayWriteMode() {
   replayState.writeTraining = !replayState.writeTraining;
+  if (!replayState.writeTraining && replayState.data) {
+    replayState.marketPosition = loadReplayMarketPosition(replayState.data);
+    applyReplayMarketPosition();
+  } else if (replayState.writeTraining) {
+    syncReplayPositionFromLog();
+  }
   updateReplayWriteToggle();
-  setStatus("#replayStatus", replayState.writeTraining ? "已开启写入，本次操作会保存到训练集。" : "已切换为测试模式，本次操作不会写入训练集。", replayState.writeTraining ? "positive" : "neutral");
+  updateReplayDecisionMode();
+  updateReplayUi();
+  const message = replayState.writeTraining
+    ? "\u5df2\u5207\u6362\u4e3a\u8bad\u7ec3\u6a21\u5f0f\uff0c\u4e70\u5165\u3001\u5356\u51fa\u3001\u89c2\u671b\u64cd\u4f5c\u4f1a\u663e\u793a\u5e76\u53ef\u5199\u5165\u8bad\u7ec3\u96c6\u3002"
+    : "\u5df2\u5207\u6362\u4e3a\u884c\u60c5\u6a21\u5f0f\uff0c\u4ec5\u67e5\u770b\u884c\u60c5\u548cAI\u5efa\u8bae\uff0c\u4e0d\u663e\u793a\u4e70\u5165\u3001\u5356\u51fa\u3001\u89c2\u671b\u64cd\u4f5c\u3002";
+  setStatus("#replayStatus", message, replayState.writeTraining ? "positive" : "neutral");
 }
+
 
 function updateReplayDecisionMode() {
   const hasPosition = Boolean(replayState.position);
-  document.querySelector(".decision-buy-entry")?.classList.toggle("hidden", hasPosition);
-  document.querySelector(".decision-sell-entry")?.classList.toggle("hidden", !hasPosition);
+  const marketMode = !replayState.writeTraining;
+  document.querySelector(".decision-actions")?.classList.toggle("hidden", marketMode);
+  document.querySelector(".decision-buy-entry")?.classList.toggle("hidden", marketMode || hasPosition);
+  document.querySelector(".decision-sell-entry")?.classList.toggle("hidden", marketMode || !hasPosition);
 }
+
 
 function updateBuyStopLossVisibility({ clearWhenHidden = true } = {}) {
   const hasBuyReason = Boolean(document.querySelector("#replayBuyReason")?.value.trim());
@@ -903,7 +926,7 @@ async function searchReplayStock() {
     hideStockSearchResults();
     return;
   }
-  if (/^\d{6}$/.test(query) || /^\d{5}$/.test(query) || /^HK[:._-]?\d{1,5}(\.HK)?$/i.test(query) || /^\d{1,5}\.HK$/i.test(query)) {
+  if (isDirectSecurityCode(query)) {
     document.querySelector("#replaySymbol").value = query;
     hideStockSearchResults();
     return;
@@ -933,8 +956,19 @@ function scheduleReplayStockSearch() {
   stockSearchTimer = window.setTimeout(searchReplayStock, 220);
 }
 
+function isDirectSecurityCode(value = "") {
+  const text = String(value || "").trim();
+  return /^\d{6}$/.test(text)
+    || /^\d{5}$/.test(text)
+    || /^HK[:._-]?\d{1,5}(\.HK)?$/i.test(text)
+    || /^\d{1,5}\.HK$/i.test(text)
+    || /^[A-Z]{1,4}\d{2,4}([._-]?[A-Z]+)?$/i.test(text)
+    || /^\d{1,3}#[A-Z0-9]+$/i.test(text);
+}
+
 const MARKET_WATCHLIST_KEY = "trading-advice:watchlist:v1";
 const MARKET_LEVEL_STORAGE_PREFIX = "trading-advice:market-levels:v1";
+const MARKET_POSITION_STORAGE_PREFIX = "trading-advice:market-position:v1";
 
 function hideMarketStockSearchResults() {
   const panel = document.querySelector("#marketStockSearchResults");
@@ -971,14 +1005,30 @@ function isMarketWatchlisted(symbol = marketState.symbol, market = marketState.m
 
 async function syncMarketRealtimeWatchlist() {
   try {
-    await fetch(apiUrl("/api/realtime-watchlist"), {
+    const response = await fetch(apiUrl("/api/realtime-watchlist"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ symbols: marketState.watchlist || [], replace: true }),
     });
+    const data = await response.json();
+    if (response.ok) marketState.realtimeWatchStatus = data;
   } catch {
     // The local watchlist remains usable even if the realtime bridge is offline.
   }
+}
+
+async function refreshMarketRealtimeSubscriptionStatus() {
+  try {
+    const response = await fetch(apiUrl("/api/realtime-watchlist"), { cache: "no-store" });
+    const data = await response.json();
+    if (response.ok) {
+      marketState.realtimeWatchStatus = data;
+      return data;
+    }
+  } catch {
+    // Keep the last known subscription status if the local server is busy.
+  }
+  return marketState.realtimeWatchStatus;
 }
 
 function marketLevelRole(level) {
@@ -1009,6 +1059,197 @@ function serializeMarketLevel(level) {
 function marketLevelStorageKey() {
   if (!marketState.symbol) return "";
   return `${MARKET_LEVEL_STORAGE_PREFIX}:${marketState.market || "cn"}:${marketState.symbol}`;
+}
+
+function defaultMarketPosition() {
+  return { status: "flat", entryDate: "", entryPrice: null, stopLoss: null };
+}
+
+function normalizeMarketPosition(payload) {
+  const status = payload?.status === "held" ? "held" : "flat";
+  const entryPrice = Number(payload?.entryPrice);
+  const stopLoss = Number(payload?.stopLoss);
+  return {
+    status,
+    entryDate: status === "held" ? String(payload?.entryDate || "") : "",
+    entryPrice: status === "held" && Number.isFinite(entryPrice) && entryPrice > 0 ? entryPrice : null,
+    stopLoss: status === "held" && Number.isFinite(stopLoss) && stopLoss > 0 ? stopLoss : null,
+  };
+}
+
+function marketPositionStorageKey(symbol = marketState.symbol, market = marketState.market) {
+  if (!symbol) return "";
+  return `${MARKET_POSITION_STORAGE_PREFIX}:${market || "cn"}:${symbol}`;
+}
+
+function loadMarketPosition() {
+  try {
+    const key = marketPositionStorageKey();
+    if (!key) return defaultMarketPosition();
+    return normalizeMarketPosition(JSON.parse(window.localStorage.getItem(key) || "null"));
+  } catch {
+    return defaultMarketPosition();
+  }
+}
+
+function saveMarketPosition() {
+  try {
+    const key = marketPositionStorageKey();
+    if (!key) return;
+    window.localStorage.setItem(key, JSON.stringify({
+      ...normalizeMarketPosition(marketState.position),
+      savedAt: new Date().toISOString(),
+      market: marketState.market || "cn",
+      symbol: marketState.symbol,
+    }));
+  } catch {
+    // Ignore storage failures in embedded browsers.
+  }
+}
+
+function marketPositionForAdvice() {
+  const position = normalizeMarketPosition(marketState.position);
+  if (position.status !== "held") return null;
+  if (!position.entryDate || !(Number(position.entryPrice) > 0) || !(Number(position.stopLoss) > 0)) return null;
+  return {
+    entryDate: position.entryDate,
+    entryPrice: Number(position.entryPrice),
+    stopLoss: Number(position.stopLoss),
+    stopLossReason: "\u5f53\u524d\u72b6\u6001\u624b\u52a8\u8bb0\u5f55\u6b62\u635f",
+    reason: "\u884c\u60c5\u6a21\u5f0f\u624b\u52a8\u8bb0\u5f55\u6301\u4ed3",
+  };
+}
+
+function updateMarketPositionUi() {
+  const position = normalizeMarketPosition(marketState.position);
+  const status = position.status;
+  document.querySelectorAll("input[name='marketPositionStatus']").forEach((input) => {
+    input.checked = input.value === status;
+  });
+  const fields = document.querySelector("#marketPositionFields");
+  fields?.classList.toggle("hidden", status !== "held");
+  const entryDate = document.querySelector("#marketEntryDate");
+  const entryPrice = document.querySelector("#marketEntryPrice");
+  const stopLoss = document.querySelector("#marketStopLoss");
+  if (entryDate) entryDate.value = position.entryDate || "";
+  if (entryPrice) entryPrice.value = position.entryPrice ? String(position.entryPrice) : "";
+  if (stopLoss) stopLoss.value = position.stopLoss ? String(position.stopLoss) : "";
+  const summary = document.querySelector("#marketPositionSummary");
+  if (summary) {
+    summary.textContent = status === "held"
+      ? `\u5df2\u6301\u4ed3${position.entryDate && position.entryPrice && position.stopLoss ? `\uff1a\u4e70\u5165 ${position.entryDate} / ${formatPrice(position.entryPrice)}\uff0c\u6b62\u635f ${formatPrice(position.stopLoss)}` : "\uff1a\u8bf7\u586b\u5199\u4e70\u5165\u65e5\u671f\u3001\u4e70\u5165\u4ef7\u683c\u548c\u6b62\u635f\u4ef7\u683c"}`
+      : "\u672a\u6301\u4ed3";
+  }
+}
+
+function readMarketPositionFromUi() {
+  const status = document.querySelector("input[name='marketPositionStatus']:checked")?.value === "held" ? "held" : "flat";
+  const entryPrice = Number(document.querySelector("#marketEntryPrice")?.value);
+  return normalizeMarketPosition({
+    status,
+    entryDate: document.querySelector("#marketEntryDate")?.value || "",
+    entryPrice,
+    stopLoss: Number(document.querySelector("#marketStopLoss")?.value),
+  });
+}
+
+function syncMarketPositionFromUi({ refreshAdvice = true } = {}) {
+  marketState.position = readMarketPositionFromUi();
+  saveMarketPosition();
+  updateMarketPositionUi();
+  if (refreshAdvice && marketState.symbol) {
+    requestMarketAiAdvice()
+      .catch((error) => setStatus("#marketStatus", error.message, "negative"));
+  }
+}
+
+function replayPositionStorageKey(data = replayState.data) {
+  if (!data?.symbol) return "";
+  return `${MARKET_POSITION_STORAGE_PREFIX}:${data.market || "cn"}:${data.symbol}`;
+}
+
+function loadReplayMarketPosition(data = replayState.data) {
+  try {
+    const key = replayPositionStorageKey(data);
+    if (!key) return defaultMarketPosition();
+    return normalizeMarketPosition(JSON.parse(window.localStorage.getItem(key) || "null"));
+  } catch {
+    return defaultMarketPosition();
+  }
+}
+
+function saveReplayMarketPosition() {
+  try {
+    const key = replayPositionStorageKey();
+    if (!key) return;
+    window.localStorage.setItem(key, JSON.stringify({
+      ...normalizeMarketPosition(replayState.marketPosition),
+      savedAt: new Date().toISOString(),
+      market: replayState.data?.market || "cn",
+      symbol: replayState.data?.symbol || "",
+    }));
+  } catch {
+    // Ignore storage failures in embedded browsers.
+  }
+}
+
+function replayMarketPositionForAdvice() {
+  const position = normalizeMarketPosition(replayState.marketPosition);
+  if (position.status !== "held") return null;
+  if (!position.entryDate || !(Number(position.entryPrice) > 0) || !(Number(position.stopLoss) > 0)) return null;
+  return {
+    entryDate: position.entryDate,
+    entryPrice: Number(position.entryPrice),
+    stopLoss: Number(position.stopLoss),
+    stopLossReason: "\u5f53\u524d\u72b6\u6001\u624b\u52a8\u8bb0\u5f55\u6b62\u635f",
+    reason: "\u884c\u60c5\u6a21\u5f0f\u624b\u52a8\u8bb0\u5f55\u6301\u4ed3",
+  };
+}
+
+function applyReplayMarketPosition() {
+  if (replayState.writeTraining) return;
+  replayState.position = replayMarketPositionForAdvice();
+  replayState.equity = 1;
+}
+
+function updateReplayPositionUi() {
+  const card = document.querySelector("#replayPositionCard");
+  if (card) card.classList.toggle("hidden", replayState.writeTraining);
+  const position = normalizeMarketPosition(replayState.marketPosition);
+  document.querySelectorAll("input[name='replayPositionStatus']").forEach((input) => {
+    input.checked = input.value === position.status;
+  });
+  document.querySelector("#replayPositionFields")?.classList.toggle("hidden", position.status !== "held");
+  const entryDate = document.querySelector("#replayEntryDateInput");
+  const entryPrice = document.querySelector("#replayEntryPriceInput");
+  const stopLoss = document.querySelector("#replayStopLossInput");
+  if (entryDate) entryDate.value = position.entryDate || "";
+  if (entryPrice) entryPrice.value = position.entryPrice ? String(position.entryPrice) : "";
+  if (stopLoss) stopLoss.value = position.stopLoss ? String(position.stopLoss) : "";
+  const summary = document.querySelector("#replayPositionSummary");
+  if (summary) {
+    summary.textContent = position.status === "held"
+      ? `\u5df2\u6301\u4ed3${position.entryDate && position.entryPrice && position.stopLoss ? `\uff1a\u4e70\u5165 ${position.entryDate} / ${formatPrice(position.entryPrice)}\uff0c\u6b62\u635f ${formatPrice(position.stopLoss)}` : "\uff1a\u8bf7\u586b\u5199\u4e70\u5165\u65e5\u671f\u3001\u4e70\u5165\u4ef7\u683c\u548c\u6b62\u635f\u4ef7\u683c"}`
+      : "\u672a\u6301\u4ed3";
+  }
+}
+
+function readReplayPositionFromUi() {
+  const status = document.querySelector("input[name='replayPositionStatus']:checked")?.value === "held" ? "held" : "flat";
+  return normalizeMarketPosition({
+    status,
+    entryDate: document.querySelector("#replayEntryDateInput")?.value || "",
+    entryPrice: Number(document.querySelector("#replayEntryPriceInput")?.value),
+    stopLoss: Number(document.querySelector("#replayStopLossInput")?.value),
+  });
+}
+
+function syncReplayPositionFromUi() {
+  replayState.marketPosition = readReplayPositionFromUi();
+  saveReplayMarketPosition();
+  applyReplayMarketPosition();
+  updateReplayPositionUi();
+  updateReplayUi();
 }
 
 function loadMarketLevels() {
@@ -1065,13 +1306,11 @@ function updateMarketTimeframeUi() {
   });
 }
 
-function renderMarketWatchlist() {
-  const list = document.querySelector("#watchlist");
-  const count = document.querySelector("#watchlistCount");
+function renderWatchlistInto(list, count) {
   if (count) count.textContent = `${marketState.watchlist.length} \u53ea`;
   if (!list) return;
   if (!marketState.watchlist.length) {
-    list.innerHTML = `<div class="dataset-empty">\u6682\u65e0\u81ea\u9009\u80a1\uff0c\u53ef\u641c\u7d22\u540e\u52a0\u5165\u3002</div>`;
+    list.innerHTML = `<div class="dataset-empty">\u6682\u65e0\u81ea\u9009\u80a1\uff0c\u53ef\u5728\u884c\u60c5\u9875\u6216\u5f53\u524d\u52a0\u8f7d\u54c1\u79cd\u4e2d\u52a0\u5165\u3002</div>`;
     return;
   }
   const metricText = (item) => {
@@ -1083,13 +1322,18 @@ function renderMarketWatchlist() {
     return `<span class="watchlist-price">${formatPrice(price)}</span><span class="watchlist-change ${pctClass}">${pctText}</span>`;
   };
   const itemTitle = (item) => item.name || item.displayName || item.displaySymbol || item.symbol;
+  const itemMeta = (item) => {
+    const timeText = item.latestTime ? ` \u00b7 ${formatSourceTimestamp(item.latestTime)}` : "";
+    const sourceText = item.latestSource === "qmt_realtime" ? " \u00b7 QMT" : "";
+    return `${escapeHtml(item.displaySymbol || item.symbol)}${item.latestDate ? ` &middot; ${escapeHtml(item.latestDate)}` : ""}${escapeHtml(timeText)}${sourceText}`;
+  };
   list.innerHTML = marketState.watchlist.map((item) => `
     <div class="watchlist-item" data-symbol="${escapeHtml(item.symbol)}" data-market="${escapeHtml(item.market || "")}">
       <button class="watchlist-main" type="button" data-symbol="${escapeHtml(item.symbol)}" data-market="${escapeHtml(item.market || "")}">
-        <span class="watchlist-drag-handle" aria-hidden="true">\u2630</span>
+        <span class="watchlist-drag-handle" aria-hidden="true">&#9776;</span>
         <span class="watchlist-title">
           <strong>${escapeHtml(itemTitle(item))}</strong>
-          <small>${escapeHtml(item.displaySymbol || item.symbol)}${item.latestDate ? ` \u00b7 ${escapeHtml(item.latestDate)}` : ""}</small>
+          <small>${itemMeta(item)}</small>
         </span>
         <span class="watchlist-metrics">${metricText(item)}</span>
       </button>
@@ -1097,6 +1341,13 @@ function renderMarketWatchlist() {
     </div>
   `).join("");
 }
+
+
+function renderMarketWatchlist() {
+  renderWatchlistInto(document.querySelector("#watchlist"), document.querySelector("#watchlistCount"));
+  renderWatchlistInto(document.querySelector("#trainingWatchlist"), document.querySelector("#trainingWatchlistCount"));
+}
+
 
 function marketDisplayTitle() {
   const name = marketState.name || "";
@@ -1124,7 +1375,10 @@ function mergeWatchlistSnapshot(items = []) {
 }
 
 async function refreshMarketWatchlistSnapshot() {
-  if (!marketState.watchlist.length) return;
+  if (!marketState.watchlist.length) {
+    renderMarketWatchlist();
+    return;
+  }
   try {
     const response = await fetch(apiUrl("/api/market-watchlist-snapshot"), {
       method: "POST",
@@ -1134,10 +1388,35 @@ async function refreshMarketWatchlistSnapshot() {
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "watchlist snapshot failed");
     if (mergeWatchlistSnapshot(data.items || [])) renderMarketWatchlist();
+    updateMarketHeader();
   } catch {
     // Keep the saved watchlist visible even if local quote enrichment fails.
   }
 }
+
+function startMarketWatchlistSnapshotPolling() {
+  window.clearInterval(marketWatchlistSnapshotTimer);
+  refreshMarketWatchlistSnapshot();
+  marketWatchlistSnapshotTimer = window.setInterval(refreshMarketWatchlistSnapshot, 5000);
+}
+
+function setTrainingWatchlistCollapsed(collapsed) {
+  const layout = document.querySelector("#replayView .replay-layout");
+  layout?.classList.toggle("watchlist-collapsed", collapsed);
+  document.querySelector("#expandTrainingWatchlist")?.classList.toggle("hidden", !collapsed);
+  const button = document.querySelector("#toggleTrainingWatchlist");
+  if (button) {
+    button.textContent = "\u6536\u8d77";
+    button.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  }
+  window.setTimeout(() => { updateReplayUi(); drawMarketChart(); }, 60);
+}
+
+function toggleTrainingWatchlist() {
+  const layout = document.querySelector("#replayView .replay-layout");
+  setTrainingWatchlistCollapsed(!layout?.classList.contains("watchlist-collapsed"));
+}
+
 
 function watchlistItemKeyFromElement(element) {
   if (!element) return "";
@@ -1256,7 +1535,7 @@ async function searchMarketStock() {
   delete input.dataset.market;
   delete input.dataset.displaySymbol;
   delete input.dataset.name;
-  if (/^\d{6}$/.test(query) || /^\d{5}$/.test(query) || /^HK[:._-]?\d{1,5}(\.HK)?$/i.test(query) || /^\d{1,5}\.HK$/i.test(query)) {
+  if (isDirectSecurityCode(query)) {
     hideMarketStockSearchResults();
     return;
   }
@@ -1310,6 +1589,7 @@ function resetMarketAiCard(label = "--") {
   document.querySelector("#marketAiScore").textContent = "--";
   const body = document.querySelector("#marketAiBody");
   if (body) body.textContent = "\u52a0\u8f7d\u884c\u60c5\u540e\uff0c\u663e\u793aAI\u5efa\u8bae\u3002";
+  updateMarketPositionUi();
 }
 
 function drawMarketChart() {
@@ -1491,8 +1771,6 @@ function drawMarketChart() {
     ctx.fillText(formatPrice(hoverPrice), 50, hoverY + 4);
     const lines = [
       `${item.date}  \u5f00:${formatPrice(item.open)} \u6536:${formatPrice(item.close)} \u9ad8:${formatPrice(item.high)} \u4f4e:${formatPrice(item.low)} \u6da8\u8dcc:${changePct === null ? "--" : formatPercent(changePct)}`,
-      `\u5149\u6807\u4ef7 ${formatPrice(hoverPrice)}`,
-      `\u663e\u793a ${marketState.visibleCount} \u6839K\u7ebf\uff0c\u4e0a/\u4e0b\u65b9\u5411\u952e\u53ef\u7f29\u653e`,
     ];
     ctx.font = "12px Microsoft YaHei, sans-serif";
     const textWidth = Math.max(...lines.map((line) => ctx.measureText(line).width));
@@ -1511,12 +1789,6 @@ function drawMarketChart() {
   ctx.fillStyle = "#17202a";
   ctx.font = "12px Microsoft YaHei, sans-serif";
   ctx.fillText(`${marketDisplayTitle()}  ${timeframeLabel(marketState.frame)} ${last.date}  O:${formatPrice(last.open)} H:${formatPrice(last.high)} L:${formatPrice(last.low)} C:${formatPrice(last.close)}`, 48, height - 20);
-  if (marketState.dragOffset > 0) {
-    ctx.fillStyle = "#647284";
-    ctx.textAlign = "right";
-    ctx.fillText(`\u67e5\u770b\u5386\u53f2\u7a97\u53e3\uff1a${candles[0].date} \u81f3 ${last.date}`, width - 24, height - 20);
-    ctx.textAlign = "left";
-  }
   updateMarketLevelToolUi();
 }
 
@@ -1544,13 +1816,12 @@ function renderMarketAiAdvice(data) {
   const model = data.model || {};
   const decision = model.decision || "--";
   const phase = data.phase?.label || data.trend?.label || "--";
-  const actionClass = marketAdviceActionClass(decision);
   const actionNode = document.querySelector("#marketAiActionText");
   const scoreNode = document.querySelector("#marketAiScore");
   const stageNode = document.querySelector("#marketAiStage");
   const bodyNode = document.querySelector("#marketAiBody");
   if (actionNode) {
-    actionNode.className = `rule-advice-action-card ${actionClass}`;
+    actionNode.className = `rule-advice-action-card ${marketAdviceActionClass(decision)}`;
     actionNode.innerHTML = `<span>\u64cd\u4f5c\u5efa\u8bae</span><strong id="marketAiDecision">${escapeHtml(decision)}</strong>`;
   }
   if (stageNode) stageNode.textContent = phase;
@@ -1572,6 +1843,14 @@ function renderMarketAiAdvice(data) {
   ].filter(Boolean);
   if (bodyNode) {
     bodyNode.innerHTML = `
+      <div class="rule-advice-section">
+        <span>\u5f53\u524d\u72b6\u6001</span>
+        <p>\u672a\u6301\u4ed3</p>
+      </div>
+      <div class="rule-advice-section">
+        <span>\u64cd\u4f5c\u5efa\u8bae</span>
+        <p>${escapeHtml(decision)}</p>
+      </div>
       <div class="rule-advice-section">
         <span>\u5f53\u524d\u9636\u6bb5</span>
         <p>${escapeHtml(phase)}</p>
@@ -1603,10 +1882,118 @@ function renderMarketAiAdvice(data) {
   document.querySelector("#marketAiModel").textContent = model.model || "--";
 }
 
+function marketRuleAdvice() {
+  if (!marketState.data?.timeframes?.daily?.length) return null;
+  const previous = {
+    data: replayState.data,
+    frame: replayState.frame,
+    cursor: replayState.cursor,
+    position: replayState.position,
+    manualLevels: replayState.manualLevels,
+  };
+  try {
+    const daily = marketState.data.timeframes.daily || [];
+    replayState.data = marketState.data;
+    replayState.frame = "daily";
+    replayState.cursor = Math.max(0, daily.length - 1);
+    replayState.position = marketPositionForAdvice();
+    replayState.manualLevels = marketState.manualLevels || [];
+    const advice = ruleLibraryAdvice();
+    return advice && replayState.position
+      ? { ...advice, side: "sell", sideLabel: "\u5356\u51fa\u89c2\u5bdf" }
+      : { ...advice, side: "buy", sideLabel: "\u4e70\u5165\u89c2\u5bdf" };
+  } finally {
+    replayState.data = previous.data;
+    replayState.frame = previous.frame;
+    replayState.cursor = previous.cursor;
+    replayState.position = previous.position;
+    replayState.manualLevels = previous.manualLevels;
+  }
+}
+
+function renderMarketRuleAdvice(advice) {
+  const actionNode = document.querySelector("#marketAiActionText");
+  const scoreNode = document.querySelector("#marketAiScore");
+  const stageNode = document.querySelector("#marketAiStage");
+  const bodyNode = document.querySelector("#marketAiBody");
+  if (!advice) {
+    resetMarketAiCard("\u7b49\u5f85K\u7ebf");
+    return;
+  }
+  const sideLabel = advice.side === "sell" ? "\u5356\u51fa\u89c2\u5bdf" : "\u4e70\u5165\u89c2\u5bdf";
+  if (actionNode) {
+    actionNode.className = `rule-advice-action-card ${advice.action || "watch"}`;
+    actionNode.innerHTML = `<span>\u64cd\u4f5c\u5efa\u8bae</span><strong id="marketAiDecision">${escapeHtml(advice.actionText || "--")}</strong>`;
+  }
+  if (stageNode) stageNode.textContent = advice.stage || "--";
+  if (scoreNode) {
+    scoreNode.textContent = advice.score == null ? "--" : `${Math.round(advice.score)}\u5206`;
+    scoreNode.className = advice.score >= 75 ? "positive-text" : advice.score >= 60 ? "" : "negative-text";
+  }
+  const listHtml = (items = []) => items.length
+    ? `<ol>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>`
+    : `<p class="muted">\u6682\u65e0</p>`;
+  if (bodyNode) {
+    bodyNode.innerHTML = `
+      <div class="rule-advice-section">
+        <span>\u5f53\u524d\u72b6\u6001</span>
+        <p>${advice.side === "sell" ? "\u5df2\u6301\u4ed3" : "\u672a\u6301\u4ed3"}</p>
+      </div>
+      <div class="rule-advice-section">
+        <span>\u64cd\u4f5c\u5efa\u8bae</span>
+        <p>${escapeHtml(advice.actionText || "--")}</p>
+      </div>
+      <div class="rule-advice-section">
+        <span>\u5f53\u524d\u9636\u6bb5</span>
+        <p>${escapeHtml(advice.stage || "--")}</p>
+      </div>
+      <div class="rule-advice-section">
+        <span>\u5339\u914d\u6a21\u578b</span>
+        <p>${escapeHtml(advice.model || "--")}${advice.score == null ? "" : `\uff0c\u5339\u914d\u5ea6 ${Math.round(advice.score)} \u5206`}</p>
+      </div>
+      <div class="rule-advice-section">
+        <span>\u7b26\u5408\u6761\u4ef6</span>
+        ${listHtml(advice.matched || [])}
+      </div>
+      <div class="rule-advice-section">
+        <span>\u7f3a\u5931\u6761\u4ef6</span>
+        ${listHtml(advice.missing || [])}
+      </div>
+      <div class="rule-advice-section">
+        <span>\u4ea4\u6613\u8ba1\u5212</span>
+        ${listHtml(advice.plan || [])}
+      </div>
+    `;
+  }
+  document.querySelector("#marketAiPhase").textContent = advice.stage || "--";
+  document.querySelector("#marketAiModel").textContent = advice.model || "--";
+}
+
 async function requestMarketAiAdvice() {
   if (!marketState.symbol) {
     setStatus("#marketStatus", "\u8bf7\u5148\u9009\u62e9\u80a1\u7968\u3002", "negative");
     return;
+  }
+  updateMarketPositionUi();
+  const position = normalizeMarketPosition(marketState.position);
+  if (position.status === "held") {
+    if (!marketPositionForAdvice()) {
+      renderMarketRuleAdvice({
+        score: null,
+        side: "sell",
+        sideLabel: "\u5356\u51fa\u89c2\u5bdf",
+        actionText: "\u8bf7\u5148\u586b\u5199\u4e70\u5165\u65e5\u671f\u3001\u4e70\u5165\u4ef7\u683c\u548c\u6b62\u635f\u4ef7\u683c",
+        stage: "\u6301\u4ed3\u4fe1\u606f\u4e0d\u5b8c\u6574",
+        model: "\u6301\u4ed3\u72b6\u6001\u8bb0\u5f55",
+        matched: ["\u5f53\u524d\u72b6\u6001\u4e3a\u5df2\u6301\u4ed3"],
+        missing: ["\u9700\u8981\u4e70\u5165\u65e5\u671f", "\u9700\u8981\u4e70\u5165\u4ef7\u683c", "\u9700\u8981\u6b62\u635f\u4ef7\u683c"],
+        plan: ["\u8865\u5145\u6301\u4ed3\u4fe1\u606f\u540e\uff0cAI\u5c06\u6309\u5356\u51fa\u89c2\u5bdf\u65b9\u5411\u8bc4\u4f30\u3002"],
+      });
+      return null;
+    }
+    const advice = marketRuleAdvice();
+    renderMarketRuleAdvice(advice);
+    return advice;
   }
   const response = await fetch(apiUrl("/api/buy-analysis"), {
     method: "POST",
@@ -1619,13 +2006,46 @@ async function requestMarketAiAdvice() {
   return data;
 }
 
+function formatSourceTimestamp(value) {
+  if (!value) return "--";
+  const pad = (number) => String(number).padStart(2, "0");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return "--";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function currentRealtimeSubscriptionItem() {
+  const status = marketState.realtimeWatchStatus || {};
+  const key = marketWatchKey(marketState.symbol, marketState.market);
+  return (status.symbols || []).find((item) => marketWatchKey(item.symbol, item.market) === key) || null;
+}
+
+function currentWatchlistItem() {
+  const key = marketWatchKey(marketState.symbol, marketState.market);
+  return (marketState.watchlist || []).find((item) => marketWatchKey(item.symbol, item.market) === key) || null;
+}
+
 function marketQuoteSourceText() {
-  const watched = isMarketWatchlisted();
-  if (!watched) return "数据来源：本地K线（未加入自选，不订阅实时）";
   const quote = marketState.realtimeQuote;
-  if (!quote) return "数据来源：本地K线 · 等待QMT实时";
-  const timeText = quote.receivedAt ? new Date(quote.receivedAt).toLocaleTimeString() : "--";
-  return `数据来源：QMT实时行情 · ${quote.trade_date || "--"} · ${timeText}`;
+  const watchItem = currentWatchlistItem();
+  const quoteTime = formatSourceTimestamp(quote?.receivedAt || (watchItem?.latestSource === "qmt_realtime" ? watchItem.latestTime : null));
+  const watched = isMarketWatchlisted();
+  if (!watched) {
+    return `\u6570\u636e\u6765\u6e90\uff1a\u672c\u5730K\u7ebf \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a-- \u00b7 \u8ba2\u9605\uff1a\u672a\u52a0\u5165\u81ea\u9009\uff0c\u672a\u8ba2\u9605`;
+  }
+  const subscription = currentRealtimeSubscriptionItem();
+  const subscriptionTime = formatSourceTimestamp(subscription?.updatedAt || marketState.realtimeWatchStatus?.updatedAt);
+  if (!subscription) {
+    return `\u6570\u636e\u6765\u6e90\uff1a\u672c\u5730K\u7ebf \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a-- \u00b7 \u8ba2\u9605\uff1a\u540c\u6b65\u4e2d`;
+  }
+  if (!quote) {
+    if (watchItem?.latestSource === "qmt_realtime" && watchItem.latestTime) {
+      return `\u6570\u636e\u6765\u6e90\uff1aQMT\u5b9e\u65f6\u884c\u60c5 \u00b7 \u884c\u60c5\u65e5\u671f\uff1a${watchItem.latestDate || "--"} \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a${quoteTime} \u00b7 \u8ba2\u9605\uff1a\u5df2\u8ba2\u9605`;
+    }
+    return `\u6570\u636e\u6765\u6e90\uff1a\u672c\u5730K\u7ebf \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a-- \u00b7 \u8ba2\u9605\uff1a\u5df2\u8bf7\u6c42QMT\u8ba2\u9605\uff0c\u7b49\u5f85\u6865\u63a5 \u00b7 \u8ba2\u9605\u65f6\u95f4\uff1a${subscriptionTime}`;
+  }
+  return `\u6570\u636e\u6765\u6e90\uff1aQMT\u5b9e\u65f6\u884c\u60c5 \u00b7 \u884c\u60c5\u65e5\u671f\uff1a${quote.trade_date || "--"} \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a${quoteTime} \u00b7 \u8ba2\u9605\uff1a\u5df2\u8ba2\u9605`;
 }
 
 function applyMarketRealtimeQuote(quote) {
@@ -1640,6 +2060,8 @@ function applyMarketRealtimeQuote(quote) {
     close: quote.close,
     volume: quote.volume || 0,
     amount: quote.amount || 0,
+    source: quote.source || "qmt_realtime",
+    receivedAt: quote.receivedAt || new Date().toISOString(),
     realtime: true,
   };
   const last = daily.at(-1);
@@ -1651,6 +2073,7 @@ function applyMarketRealtimeQuote(quote) {
 }
 
 async function refreshMarketRealtimeQuote({ redraw = true } = {}) {
+  await refreshMarketRealtimeSubscriptionStatus();
   if (!marketState.symbol || !isMarketWatchlisted()) {
     marketState.realtimeQuote = null;
     updateMarketHeader();
@@ -1676,8 +2099,8 @@ function startMarketRealtimePolling() {
   window.clearInterval(marketRealtimeTimer);
   if (!marketState.symbol || !isMarketWatchlisted()) return;
   marketRealtimeTimer = window.setInterval(() => {
-    if (activeView === "market") refreshMarketRealtimeQuote();
-  }, 3000);
+    if (activeView === "market" || activeView === "replay") refreshMarketRealtimeQuote();
+  }, 5000);
 }
 
 async function loadMarketSymbol(symbol, market = null, meta = {}) {
@@ -1701,6 +2124,7 @@ async function loadMarketSymbol(symbol, market = null, meta = {}) {
   marketState.displaySymbol = data.displaySymbol || meta.displaySymbol || displaySecuritySymbol(data, symbol);
   marketState.name = data.name || meta.name || marketState.name || "";
   marketState.realtimeQuote = null;
+  marketState.position = loadMarketPosition();
   marketState.manualLevels = loadMarketLevels();
   marketState.frame = "daily";
   marketState.visibleCount = 180;
@@ -1713,6 +2137,7 @@ async function loadMarketSymbol(symbol, market = null, meta = {}) {
   marketState.isDragging = false;
   updateMarketTimeframeUi();
   updateMarketLevelToolUi();
+  updateMarketPositionUi();
   updateMarketHeader();
   drawMarketChart();
   await refreshMarketRealtimeQuote({ redraw: true });
@@ -1729,7 +2154,7 @@ async function loadMarketFromInput() {
   const input = document.querySelector("#marketStockSearch");
   let selected = marketSelectedInput();
   const raw = input?.value.trim() || "";
-  const directCode = /^\d{6}$/.test(raw) || /^\d{5}$/.test(raw) || /^HK[:._-]?\d{1,5}(\.HK)?$/i.test(raw) || /^\d{1,5}\.HK$/i.test(raw);
+  const directCode = isDirectSecurityCode(raw);
   if (!input?.dataset.symbol && raw && !directCode) {
     const response = await fetch(apiUrl(`/api/search-stocks?q=${encodeURIComponent(raw)}&limit=1`), { cache: "no-store" });
     const data = await response.json();
@@ -1765,6 +2190,34 @@ async function addCurrentMarketToWatchlist() {
   await refreshMarketRealtimeQuote({ redraw: true });
   startMarketRealtimePolling();
   setStatus("#marketStatus", exists ? "\u81ea\u9009\u80a1\u5df2\u5b58\u5728\u3002" : "\u5df2\u52a0\u5165\u81ea\u9009\u80a1\u3002", "positive");
+}
+
+async function addCurrentReplayToWatchlist() {
+  if (!replayState.data?.symbol) {
+    setStatus("#replayStatus", "\u8bf7\u5148\u52a0\u8f7d\u4e00\u53ea\u80a1\u7968\u3002", "negative");
+    return;
+  }
+  const data = replayState.data;
+  const market = data.market || "cn";
+  const key = marketWatchKey(data.symbol, market);
+  const exists = (marketState.watchlist || []).some((item) => marketWatchKey(item.symbol, item.market) === key);
+  if (!exists) {
+    marketState.watchlist.unshift({
+      symbol: data.symbol,
+      market,
+      displaySymbol: displaySecuritySymbol(data, data.symbol),
+      name: data.name || "",
+    });
+    saveMarketWatchlist();
+    renderMarketWatchlist();
+  }
+  await syncMarketRealtimeWatchlist();
+  await refreshMarketWatchlistSnapshot();
+  if (marketState.symbol === data.symbol && (marketState.market || "cn") === market) {
+    await refreshMarketRealtimeQuote({ redraw: true });
+    startMarketRealtimePolling();
+  }
+  setStatus("#replayStatus", exists ? "\u81ea\u9009\u80a1\u5df2\u5b58\u5728\u3002" : "\u5df2\u52a0\u5165\u81ea\u9009\u80a1\uff0cQMT\u6865\u63a5\u5c06\u6309\u81ea\u9009\u5217\u8868\u8ba2\u9605\u3002", "positive");
 }
 
 function marketCanvasPoint(event) {
@@ -1960,7 +2413,6 @@ function zoomMarketChart(direction) {
   marketState.hoverIndex = null;
   marketState.hoverY = null;
   drawMarketChart();
-  setStatus("#marketStatus", `\u5f53\u524d\u663e\u793a ${marketState.visibleCount} \u6839K\u7ebf\u3002`, "neutral");
 }
 
 function handleMarketWheel(event) {
@@ -2075,10 +2527,14 @@ function displaySecuritySymbol(data, fallback = "--") {
 }
 
 function replayQuoteStatusText(candle) {
+  const label = timeframeLabel(replayState.frame);
+  const timeText = candle?.receivedAt ? formatSourceTimestamp(candle.receivedAt) : formatSourceTimestamp(candle?.date);
   if (["5m", "30m", "60m"].includes(replayState.frame)) {
-    return candle ? `\u672c\u5730${timeframeLabel()}` : `${timeframeLabel()}\u672a\u5bfc\u5165`;
+    return candle ? `\u672c\u5730${label} \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a${timeText}` : `${label}\u672a\u5bfc\u5165`;
   }
-  return candle?.realtime ? "QMT实时未收盘" : `\u672c\u5730${timeframeLabel()}`;
+  return candle?.realtime
+    ? `QMT\u5b9e\u65f6\u884c\u60c5 \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a${timeText}`
+    : `\u672c\u5730${label} \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a${timeText}`;
 }
 
 function renderDatasetActions(actions = []) {
@@ -2409,7 +2865,7 @@ function replayLevelInfoText() {
     const typeText = manualLevelType(selected) === "support" ? "支撑" : "压力";
     return `已选中${typeText}线 ${formatPrice(selected.price)}，可拖动调整或删除`;
   }
-  return "正常浏览：可拖动画布、上下键缩放";
+  return "";
 }
 
 
@@ -2947,13 +3403,6 @@ function drawReplayChart() {
   ctx.fillStyle = "#17202a";
   ctx.font = "12px Microsoft YaHei, sans-serif";
   ctx.fillText(`${lastDateText}${last.realtime ? " 实时" : ""}  O:${formatPrice(last.open)} H:${formatPrice(last.high)} L:${formatPrice(last.low)} C:${formatPrice(last.close)}`, 48, height - 20);
-  if (replayState.dragOffset > 0) {
-    ctx.fillStyle = "#647284";
-    ctx.textAlign = "right";
-    const firstDateText = replayState.blindMode ? "日期已隐藏" : candles[0].date;
-    ctx.fillText(`查看历史窗口：${firstDateText} 至 ${lastDateText}`, width - 24, height - 20);
-    ctx.textAlign = "left";
-  }
 }
 
 function updateReplayHover(event) {
@@ -4002,6 +4451,18 @@ function renderRuleAdvice() {
   const executeButton = document.querySelector("#executeRuleAdvice");
   if (!stageNode || !scoreNode || !bodyNode) return;
   const advice = ruleLibraryAdvice();
+  if (!replayState.writeTraining && replayState.marketPosition?.status === "held" && !replayMarketPositionForAdvice()) {
+    advice.side = "sell";
+    advice.sideLabel = "\u5356\u51fa\u89c2\u5bdf";
+    advice.action = "hold_position";
+    advice.actionText = "\u8bf7\u5148\u586b\u5199\u4e70\u5165\u65e5\u671f\u3001\u4e70\u5165\u4ef7\u683c\u548c\u6b62\u635f\u4ef7\u683c";
+    advice.stage = "\u6301\u4ed3\u4fe1\u606f\u4e0d\u5b8c\u6574";
+    advice.model = "\u6301\u4ed3\u72b6\u6001\u8bb0\u5f55";
+    advice.score = null;
+    advice.matched = ["\u5f53\u524d\u72b6\u6001\u4e3a\u5df2\u6301\u4ed3"];
+    advice.missing = ["\u9700\u8981\u4e70\u5165\u65e5\u671f", "\u9700\u8981\u4e70\u5165\u4ef7\u683c", "\u9700\u8981\u6b62\u635f\u4ef7\u683c"];
+    advice.plan = ["\u8865\u5145\u6301\u4ed3\u4fe1\u606f\u540e\uff0cAI\u5c06\u6309\u5356\u51fa\u89c2\u5bdf\u65b9\u5411\u8bc4\u4f30\u3002"];
+  }
   const hasCandle = Boolean(currentReplayCandle());
   if (copyButton) copyButton.disabled = !hasCandle;
   if (executeButton) executeButton.disabled = !hasCandle;
@@ -4009,7 +4470,10 @@ function renderRuleAdvice() {
   scoreNode.textContent = advice.score == null ? "--" : `${Math.round(advice.score)}分`;
   scoreNode.className = advice.score >= 75 ? "positive-text" : advice.score >= 60 ? "" : "negative-text";
   if (actionNode) {
-    actionNode.innerHTML = `<span>操作建议</span><strong>${escapeHtml(advice.actionText || "建议观望")}</strong>`;
+    const marketMode = !replayState.writeTraining;
+    actionNode.innerHTML = marketMode
+      ? `<span>\u64cd\u4f5c\u5efa\u8bae</span><strong>${escapeHtml(advice.actionText || "--")}</strong>`
+      : `<span>\u64cd\u4f5c\u5efa\u8bae</span><strong>${escapeHtml(advice.actionText || "\u5efa\u8bae\u89c2\u671b")}</strong>`;
     actionNode.className = `rule-advice-action-card ${advice.action || "watch"}`;
   }
   const listHtml = (items = []) => {
@@ -4021,7 +4485,7 @@ function renderRuleAdvice() {
   bodyNode.innerHTML = `
     <div class="rule-advice-section">
       <span>当前状态</span>
-      <p>${escapeHtml(advice.sideLabel || "--")}</p>
+      <p>${!replayState.writeTraining ? (replayState.marketPosition?.status === "held" ? "\u5df2\u6301\u4ed3" : "\u672a\u6301\u4ed3") : escapeHtml(advice.sideLabel || "--")}</p>
     </div>
     <div class="rule-advice-section">
       <span>当前阶段</span>
@@ -4256,6 +4720,10 @@ function replayActionsThroughCursor(cursor = replayState.cursor) {
 }
 
 function syncReplayPositionFromLog() {
+  if (!replayState.writeTraining) {
+    applyReplayMarketPosition();
+    return;
+  }
   const restoredState = replayStateFromActions(replayActionsThroughCursor());
   replayState.equity = restoredState.equity;
   replayState.position = restoredState.position;
@@ -4303,6 +4771,7 @@ function navigateReplayCandle(step) {
 
 function updateReplayUi() {
   const candle = currentReplayCandle();
+  applyReplayMarketPosition();
   syncManualLevelInputs();
   const entryPrice = Number(replayState.position?.entryPrice) || null;
   const hasPosition = Boolean(entryPrice && replayState.position);
@@ -4333,6 +4802,7 @@ function updateReplayUi() {
   document.querySelector("#replayPrevCandle").disabled = !replayState.data || replayState.cursor <= 0;
   document.querySelector("#replayNextCandle").disabled = !replayState.data || replayState.cursor >= daily.length - 1;
   updateReplayWriteToggle();
+  updateReplayPositionUi();
   updateReplayDecisionMode();
   updateAiAdviceFeedbackUi();
   updateBuyStopLossVisibility({ clearWhenHidden: false });
@@ -4500,6 +4970,7 @@ async function loadTradeReplay({ button, symbol, date, market = null, blind = fa
         date,
         lookback: 700,
         fresh,
+        includeRealtime: !replayState.writeTraining || isMarketWatchlisted(symbol, market),
       }),
     });
     const data = await response.json();
@@ -4516,6 +4987,7 @@ async function loadTradeReplay({ button, symbol, date, market = null, blind = fa
       frame: "daily",
       cursor: data.cursor,
       position: null,
+      marketPosition: loadReplayMarketPosition(data),
       equity: 1,
       log: [],
       visibleCount: 700,
@@ -5736,6 +6208,7 @@ document.querySelector("#marketSaveSelectedLevelReason")?.addEventListener("clic
 document.querySelector("#marketDeleteSelectedLevel")?.addEventListener("click", deleteMarketSelectedLevel);
 document.querySelector("#marketAddWatch")?.addEventListener("click", addCurrentMarketToWatchlist);
 document.querySelector("#marketAddWatchOverlay")?.addEventListener("click", addCurrentMarketToWatchlist);
+document.querySelector("#replayAddWatch")?.addEventListener("click", addCurrentReplayToWatchlist);
 document.querySelector("#marketRefresh")?.addEventListener("click", () => {
   if (marketState.symbol) {
     loadMarketSymbol(marketState.symbol, marketState.market, { displaySymbol: marketState.displaySymbol })
@@ -5750,6 +6223,54 @@ document.querySelector("#marketAiAdvice")?.addEventListener("click", async () =>
     setStatus("#marketStatus", error.message, "negative");
   }
 });
+document.querySelectorAll("input[name='marketPositionStatus']").forEach((input) => {
+  input.addEventListener("change", () => syncMarketPositionFromUi({ refreshAdvice: true }));
+});
+document.querySelector("#marketEntryDate")?.addEventListener("change", () => syncMarketPositionFromUi({ refreshAdvice: true }));
+document.querySelector("#marketEntryPrice")?.addEventListener("change", () => syncMarketPositionFromUi({ refreshAdvice: true }));
+document.querySelector("#marketStopLoss")?.addEventListener("change", () => syncMarketPositionFromUi({ refreshAdvice: true }));
+document.querySelectorAll("input[name='replayPositionStatus']").forEach((input) => {
+  input.addEventListener("change", syncReplayPositionFromUi);
+});
+document.querySelector("#replayEntryDateInput")?.addEventListener("change", syncReplayPositionFromUi);
+document.querySelector("#replayEntryPriceInput")?.addEventListener("change", syncReplayPositionFromUi);
+document.querySelector("#replayStopLossInput")?.addEventListener("change", syncReplayPositionFromUi);
+document.querySelector("#trainingWatchlist")?.addEventListener("click", async (event) => {
+  if (marketState.watchSuppressClick) {
+    marketState.watchSuppressClick = false;
+    event.preventDefault();
+    return;
+  }
+  const remove = event.target.closest(".watchlist-remove");
+  if (remove) {
+    const key = `${remove.dataset.market || "cn"}:${remove.dataset.symbol}`;
+    marketState.watchlist = marketState.watchlist.filter((item) => `${item.market || "cn"}:${item.symbol}` !== key);
+    saveMarketWatchlist();
+    renderMarketWatchlist();
+    await syncMarketRealtimeWatchlist();
+    setStatus("#replayStatus", "\u5df2\u4ece\u81ea\u9009\u80a1\u5220\u9664\uff0cQMT\u6865\u63a5\u4f1a\u540c\u6b65\u9000\u8ba2\u3002", "neutral");
+    return;
+  }
+  const button = event.target.closest(".watchlist-main");
+  if (!button) return;
+  const symbolInput = document.querySelector("#replaySymbol");
+  if (symbolInput) symbolInput.value = button.dataset.symbol || "";
+  await loadTradeReplay({
+    button: document.querySelector("#startReplay"),
+    symbol: button.dataset.symbol,
+    market: button.dataset.market || null,
+    date: "",
+    blind: false,
+    loadingText: "\u6b63\u5728\u52a0\u8f7d\u884c\u60c5...",
+  });
+});
+
+document.querySelector("#toggleTrainingWatchlist")?.addEventListener("click", toggleTrainingWatchlist);
+document.querySelector("#expandTrainingWatchlist")?.addEventListener("click", () => setTrainingWatchlistCollapsed(false));
+document.querySelector("#trainingWatchlist")?.addEventListener("pointerdown", startWatchlistLongPress);
+document.querySelector("#trainingWatchlist")?.addEventListener("pointermove", dragWatchlistItem);
+document.querySelector("#trainingWatchlist")?.addEventListener("pointerup", endWatchlistDrag);
+document.querySelector("#trainingWatchlist")?.addEventListener("pointercancel", endWatchlistDrag);
 document.querySelector("#watchlist")?.addEventListener("click", async (event) => {
   if (marketState.watchSuppressClick) {
     marketState.watchSuppressClick = false;
@@ -5943,8 +6464,9 @@ setBacktestDefaults();
 syncStrategyControls();
 loadMarketWatchlist();
 renderMarketWatchlist();
+updateMarketPositionUi();
 syncMarketRealtimeWatchlist();
-refreshMarketWatchlistSnapshot();
+startMarketWatchlistSnapshotPolling();
 drawMarketChart();
 setView("replay");
 updateLevelToolUi();
