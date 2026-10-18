@@ -1093,6 +1093,8 @@ function readHumanReplaySelections() {
       directionLabel: "",
       stageValue: "",
       stageLabel: "",
+      sellCorrection: "",
+      sellCorrectionLabel: "",
     };
   }
   const human = humanStructureSelections();
@@ -1108,6 +1110,8 @@ function readHumanReplaySelections() {
     directionLabel: human.humanDirection || "",
     stageValue: human.humanStageValue || "",
     stageLabel: human.humanStage || "",
+    sellCorrection: human.humanSellCorrection || "",
+    sellCorrectionLabel: human.humanSellLabel || "",
   };
 }
 
@@ -1321,7 +1325,83 @@ function applyHumanReplayOverrides(advice, humanOverride = null, context = {}) {
   } else {
     copy.trendBiasNote = `人工趋势：${directionLabel || "跟随系统"}${stageLabel ? ` / ${stageLabel}` : ""}。原评分不变。`;
   }
+
+  if (!copy.autoAction) {
+    copy.autoAction = copy.action || "";
+    copy.autoActionText = copy.actionText || "";
+  }
+  const sellValue = String(human.sellCorrection || human.humanSellCorrection || "").trim();
+  const sellLabelInput = String(human.sellCorrectionLabel || human.humanSellLabel || "").trim();
+  const sellSpecs = {
+    stop_loss: { kind: "sell", label: "止损" },
+    "止损": { kind: "sell", label: "止损" },
+    breakeven_stop: { kind: "sell", label: "保本止损" },
+    "保本止损": { kind: "sell", label: "保本止损" },
+    take_profit: { kind: "sell", label: "止盈" },
+    "止盈": { kind: "sell", label: "止盈" },
+    hold_no_sell: { kind: "hold", label: "观望-不卖" },
+    "观望-不卖": { kind: "hold", label: "观望-不卖" },
+  };
+  const sellSpec = sellSpecs[sellValue] || sellSpecs[sellLabelInput] || null;
+  if (!sellSpec) {
+    copy.humanSellCorrection = "";
+    copy.humanSellLabel = "";
+    copy.sellCorrectionReason = "";
+  } else {
+    copy.humanSellCorrection = sellValue || sellSpec.label;
+    copy.humanSellLabel = sellSpec.label;
+    if (sellSpec.kind === "sell") {
+      copy.action = "sell";
+      copy.actionText = "建议卖出";
+    } else if (copy.action !== "buy") {
+      const stayInPosition = copy.side === "sell" || copy.action === "sell" || copy.action === "hold_position" || copy.autoAction === "sell" || copy.autoAction === "hold_position";
+      copy.action = stayInPosition ? "hold_position" : "watch";
+      copy.actionText = stayInPosition ? "继续持有" : "建议观望";
+    }
+    copy.sellCorrectionReason = `人工卖出修正：${sellSpec.label}。训练采用该卖出结果，原评分、模型和匹配特征不变。`;
+  }
   return lockScores();
+}
+
+function trainingDecisionFromAdvice(advice, action, reason, note) {
+  const correction = String(advice?.humanSellCorrection || "").trim();
+  const autoAdviceAction = advice?.autoAction || "";
+  const autoAdviceText = advice?.autoActionText || "";
+  if (!correction) {
+    return {
+      action,
+      reason,
+      note,
+      humanSellCorrection: "",
+      humanSellLabel: "",
+      autoAdviceAction,
+      autoAdviceText,
+    };
+  }
+  const label = advice.humanSellLabel || "";
+  const humanReason = String(advice.sellCorrectionReason || label || "").trim();
+  const cancelsSellOnly = correction === "hold_no_sell" || label === "观望-不卖";
+  if (cancelsSellOnly && advice.action === "buy") {
+    return {
+      action,
+      reason,
+      note,
+      humanSellCorrection: correction,
+      humanSellLabel: label,
+      autoAdviceAction,
+      autoAdviceText,
+    };
+  }
+  const humanAction = advice.action === "sell" ? "sell" : advice.action === "buy" ? "buy" : "hold";
+  return {
+    action: humanAction,
+    reason: humanReason || reason,
+    note: humanReason || note || reason || "",
+    humanSellCorrection: correction,
+    humanSellLabel: label,
+    autoAdviceAction,
+    autoAdviceText,
+  };
 }
 
 function ruleLibraryAdvice() {
@@ -2117,5 +2197,5 @@ function ruleLibraryAdvice() {
     return attachStructureRecognition(ruleLibraryAdvice(), history);
   }
 
-  return { analyze, recognizeMarketStructure, applyHumanReplayOverrides, version: "frontend-rule-library-v1" };
+  return { analyze, recognizeMarketStructure, applyHumanReplayOverrides, trainingDecisionFromAdvice, version: "frontend-rule-library-v1" };
 });

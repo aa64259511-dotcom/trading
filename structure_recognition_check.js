@@ -364,6 +364,66 @@ assert.strictEqual(upHold.action, "hold_position");
 assert.strictEqual(upHold.actionText, "继续持有");
 assert.strictEqual(upHold.score, 88);
 
+const sellModel = overrideBase({
+  side: "sell",
+  action: "sell",
+  actionText: "建议卖出",
+  model: "卖出/止盈风险模型",
+  score: 86,
+  matched: ["跌破5日线"],
+  pressurePlan: null,
+});
+const stopped = core.applyHumanReplayOverrides(sellModel, { sellCorrection: "stop_loss", sellCorrectionLabel: "止损" }, { close: 100 });
+assert.strictEqual(stopped.action, "sell");
+assert.strictEqual(stopped.actionText, "建议卖出");
+assert.strictEqual(stopped.humanSellLabel, "止损");
+assert.strictEqual(stopped.score, 86);
+assert.strictEqual(stopped.model, "卖出/止盈风险模型");
+assert.deepStrictEqual(stopped.matched, ["跌破5日线"]);
+assert.strictEqual(stopped.pressurePlan, null);
+assert.ok(stopped.sellCorrectionReason.includes("止损"));
+assert.ok(!stopped.sellCorrectionReason.includes("120"));
+const trainedStop = core.trainingDecisionFromAdvice(stopped, "hold", "自动卖出", "");
+assert.strictEqual(trainedStop.action, "sell");
+assert.ok(trainedStop.reason.includes("止损"));
+assert.ok(!trainedStop.reason.includes("自动卖出"));
+assert.strictEqual(trainedStop.humanSellCorrection, "stop_loss");
+
+const breakeven = core.applyHumanReplayOverrides(sellModel, { sellCorrection: "breakeven_stop" }, { close: 100 });
+assert.strictEqual(breakeven.humanSellLabel, "保本止损");
+assert.strictEqual(breakeven.action, "sell");
+assert.strictEqual(breakeven.score, 86);
+
+const noSell = core.applyHumanReplayOverrides(sellModel, { sellCorrection: "hold_no_sell" }, { close: 100 });
+assert.strictEqual(noSell.action, "hold_position");
+assert.strictEqual(noSell.actionText, "继续持有");
+assert.strictEqual(noSell.score, 86);
+assert.strictEqual(noSell.model, "卖出/止盈风险模型");
+assert.strictEqual(noSell.autoAction, "sell");
+const trainedHold = core.trainingDecisionFromAdvice(noSell, "sell", "自动卖出", "");
+assert.strictEqual(trainedHold.action, "hold");
+assert.ok(trainedHold.reason.includes("观望-不卖"));
+assert.strictEqual(trainedHold.autoAdviceAction, "sell");
+
+const buyKept = core.applyHumanReplayOverrides(overrideBase({ bypassBuyEligible: true }), { status: "", sellCorrection: "hold_no_sell" }, overrideClose);
+assert.strictEqual(buyKept.action, "buy");
+assert.strictEqual(buyKept.score, 88);
+const trainedBuy = core.trainingDecisionFromAdvice(buyKept, "buy", "原买入理由", "");
+assert.strictEqual(trainedBuy.action, "buy");
+assert.strictEqual(trainedBuy.reason, "原买入理由");
+
+const forcedProfit = core.applyHumanReplayOverrides(overrideBase({
+  action: "watch",
+  actionText: "建议观望",
+  pressurePlan: null,
+}), { sellCorrection: "take_profit" }, { close: 100 });
+assert.strictEqual(forcedProfit.action, "sell");
+assert.strictEqual(forcedProfit.actionText, "建议卖出");
+assert.strictEqual(forcedProfit.humanSellLabel, "止盈");
+assert.strictEqual(forcedProfit.score, 88);
+assert.strictEqual(forcedProfit.pressurePlan, null);
+assert.ok(generated.includes("function trainingDecisionFromAdvice("));
+
 console.log("structure recognition checks passed");
 console.log(JSON.stringify({
   up: { direction: upStructure.trendDirection, stage: upStructure.trendStage, confidence: upStructure.trendConfidence, support: upStructure.supportValidation },

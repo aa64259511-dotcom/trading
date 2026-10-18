@@ -2998,6 +2998,8 @@ async function restoreTrainingRecord(recordId) {
   document.querySelector("#replayTrendStage").value = focus.humanTrendStage || first.humanTrendStage || "";
   document.querySelector("#replaySupportStatus").value = focus.supportStatus || first.supportStatus || "";
   document.querySelector("#replaySupportEvidence").value = focus.supportValidationEvidence || first.supportValidationEvidence || "";
+  const sellCorrectionNode = document.querySelector("#replaySellCorrection");
+  if (sellCorrectionNode) sellCorrectionNode.value = focus.humanSellCorrection || first.humanSellCorrection || "";
   updateReplayUi();
   setView("replay");
   setStatus("#replayStatus", `已复现训练集：${displaySecuritySymbol(dataset, dataset.symbol || first.symbol)} ${dataset.startDate || first.date}`, "positive");
@@ -6060,6 +6062,8 @@ function structureRecognitionSummaryLines(advice) {
     `支撑验证状态：${supportView.statusText}`,
     `验证原因：${supportView.reason || "--"}`,
     advice.bypassBuyReason ? `旁路买入：${advice.bypassBuyEligible ? "满足盈亏比和止损" : "未开启"}。${advice.bypassBuyReason}` : "",
+    advice.humanSellLabel ? `卖出修正：${advice.humanSellLabel}` : "",
+    advice.sellCorrectionReason || "",
   ].filter(Boolean);
 }
 
@@ -6076,6 +6080,9 @@ function humanStructureSelections() {
   const stageLabel = stageValue ? (stageNode?.selectedOptions?.[0]?.textContent || "").trim() : "";
   const supportText = (supportNode?.selectedOptions?.[0]?.textContent || "").trim();
   const evidenceText = (evidenceNode?.selectedOptions?.[0]?.textContent || "").trim();
+  const sellNode = document.querySelector("#replaySellCorrection");
+  const sellValue = sellNode?.value || "";
+  const sellLabel = sellValue ? (sellNode?.selectedOptions?.[0]?.textContent || "").trim() : "";
   return {
     humanDirection: directionLabel,
     humanDirectionValue: directionValue,
@@ -6085,6 +6092,8 @@ function humanStructureSelections() {
     humanSupportValue: supportValue,
     humanEvidence: evidenceValue && evidenceText !== "未填写" ? evidenceText : "",
     humanEvidenceValue: evidenceValue,
+    humanSellCorrection: sellValue,
+    humanSellLabel: sellLabel,
   };
 }
 
@@ -6158,6 +6167,7 @@ function structureRecognitionSectionHtml(advice) {
       <p>趋势阶段：${escapeHtml(advice.trendStage || "--")}</p>
       <p>趋势置信度：${escapeHtml(confidence)}</p>
       ${advice.trendBiasNote ? `<p>趋势对建议：${escapeHtml(advice.trendBiasNote)}</p>` : ""}
+      ${advice.humanSellLabel ? `<p>卖出修正：${escapeHtml(advice.humanSellLabel)}</p><p>${escapeHtml(advice.sellCorrectionReason || "")}</p>` : ""}
       <p>支撑候选：${escapeHtml(structureCandidateText(advice.supportCandidates))}</p>
       <p>压力候选：${escapeHtml(structureCandidateText(advice.resistanceCandidates))}</p>
       <p>支撑验证：${escapeHtml(structureStatusText(advice.supportValidation))}</p>
@@ -6313,6 +6323,8 @@ function readHumanReplaySelections() {
       directionLabel: "",
       stageValue: "",
       stageLabel: "",
+      sellCorrection: "",
+      sellCorrectionLabel: "",
     };
   }
   const human = humanStructureSelections();
@@ -6328,6 +6340,8 @@ function readHumanReplaySelections() {
     directionLabel: human.humanDirection || "",
     stageValue: human.humanStageValue || "",
     stageLabel: human.humanStage || "",
+    sellCorrection: human.humanSellCorrection || "",
+    sellCorrectionLabel: human.humanSellLabel || "",
   };
 }
 
@@ -6541,7 +6555,83 @@ function applyHumanReplayOverrides(advice, humanOverride = null, context = {}) {
   } else {
     copy.trendBiasNote = `人工趋势：${directionLabel || "跟随系统"}${stageLabel ? ` / ${stageLabel}` : ""}。原评分不变。`;
   }
+
+  if (!copy.autoAction) {
+    copy.autoAction = copy.action || "";
+    copy.autoActionText = copy.actionText || "";
+  }
+  const sellValue = String(human.sellCorrection || human.humanSellCorrection || "").trim();
+  const sellLabelInput = String(human.sellCorrectionLabel || human.humanSellLabel || "").trim();
+  const sellSpecs = {
+    stop_loss: { kind: "sell", label: "止损" },
+    "止损": { kind: "sell", label: "止损" },
+    breakeven_stop: { kind: "sell", label: "保本止损" },
+    "保本止损": { kind: "sell", label: "保本止损" },
+    take_profit: { kind: "sell", label: "止盈" },
+    "止盈": { kind: "sell", label: "止盈" },
+    hold_no_sell: { kind: "hold", label: "观望-不卖" },
+    "观望-不卖": { kind: "hold", label: "观望-不卖" },
+  };
+  const sellSpec = sellSpecs[sellValue] || sellSpecs[sellLabelInput] || null;
+  if (!sellSpec) {
+    copy.humanSellCorrection = "";
+    copy.humanSellLabel = "";
+    copy.sellCorrectionReason = "";
+  } else {
+    copy.humanSellCorrection = sellValue || sellSpec.label;
+    copy.humanSellLabel = sellSpec.label;
+    if (sellSpec.kind === "sell") {
+      copy.action = "sell";
+      copy.actionText = "建议卖出";
+    } else if (copy.action !== "buy") {
+      const stayInPosition = copy.side === "sell" || copy.action === "sell" || copy.action === "hold_position" || copy.autoAction === "sell" || copy.autoAction === "hold_position";
+      copy.action = stayInPosition ? "hold_position" : "watch";
+      copy.actionText = stayInPosition ? "继续持有" : "建议观望";
+    }
+    copy.sellCorrectionReason = `人工卖出修正：${sellSpec.label}。训练采用该卖出结果，原评分、模型和匹配特征不变。`;
+  }
   return lockScores();
+}
+
+function trainingDecisionFromAdvice(advice, action, reason, note) {
+  const correction = String(advice?.humanSellCorrection || "").trim();
+  const autoAdviceAction = advice?.autoAction || "";
+  const autoAdviceText = advice?.autoActionText || "";
+  if (!correction) {
+    return {
+      action,
+      reason,
+      note,
+      humanSellCorrection: "",
+      humanSellLabel: "",
+      autoAdviceAction,
+      autoAdviceText,
+    };
+  }
+  const label = advice.humanSellLabel || "";
+  const humanReason = String(advice.sellCorrectionReason || label || "").trim();
+  const cancelsSellOnly = correction === "hold_no_sell" || label === "观望-不卖";
+  if (cancelsSellOnly && advice.action === "buy") {
+    return {
+      action,
+      reason,
+      note,
+      humanSellCorrection: correction,
+      humanSellLabel: label,
+      autoAdviceAction,
+      autoAdviceText,
+    };
+  }
+  const humanAction = advice.action === "sell" ? "sell" : advice.action === "buy" ? "buy" : "hold";
+  return {
+    action: humanAction,
+    reason: humanReason || reason,
+    note: humanReason || note || reason || "",
+    humanSellCorrection: correction,
+    humanSellLabel: label,
+    autoAdviceAction,
+    autoAdviceText,
+  };
 }
 
 function composeReplayAdvice() {
@@ -6773,6 +6863,7 @@ function aiAdviceReasonText(advice = currentAiAdviceSnapshot()) {
   const plan = (advice.plan || []).slice(0, 4).join("；");
   return [
     `AI认可：${advice.actionText || "操作建议"}`,
+    advice.humanSellLabel ? `卖出修正：${advice.humanSellLabel}` : "",
     advice.trendBiasNote ? `趋势：${advice.trendBiasNote}` : "",
     advice.bypassBuyReason ? `支撑：${advice.bypassBuyReason}` : "",
     advice.stage ? `阶段：${advice.stage}` : "",
@@ -6873,6 +6964,11 @@ function currentAiAdviceSnapshot() {
     trendBiasNote: advice.trendBiasNote || "",
     modelTrendDirection: advice.modelTrendDirection || "",
     modelTrendStage: advice.modelTrendStage || "",
+    humanSellCorrection: advice.humanSellCorrection || "",
+    humanSellLabel: advice.humanSellLabel || "",
+    sellCorrectionReason: advice.sellCorrectionReason || "",
+    autoAction: advice.autoAction || "",
+    autoActionText: advice.autoActionText || "",
     side: advice.side || "",
     sideLabel: advice.sideLabel || "",
     action: advice.action || "",
@@ -6927,6 +7023,11 @@ function normalizeLoggedAdviceSnapshot(record) {
     trendBiasNote: snapshot?.trendBiasNote || "",
     modelTrendDirection: snapshot?.modelTrendDirection || "",
     modelTrendStage: snapshot?.modelTrendStage || "",
+    humanSellCorrection: snapshot?.humanSellCorrection || "",
+    humanSellLabel: snapshot?.humanSellLabel || "",
+    sellCorrectionReason: snapshot?.sellCorrectionReason || "",
+    autoAction: snapshot?.autoAction || "",
+    autoActionText: snapshot?.autoActionText || "",
     stopLoss: snapshot?.stopLoss || record?.stopLoss || null,
     stopBasis: snapshot?.stopBasis || record?.stopLossReason || "",
     stopRiskPct: snapshot?.stopRiskPct == null ? null : snapshot.stopRiskPct,
@@ -7224,15 +7325,24 @@ function replayTrainingAnnotations(advice = currentAiAdviceSnapshot()) {
     supportStatus: document.querySelector("#replaySupportStatus")?.value || "",
     supportValidationEvidence: document.querySelector("#replaySupportEvidence")?.value || "",
     structure: document.querySelector("#replayStructure")?.value.trim() || "",
+    humanSellCorrection: advice.humanSellCorrection || document.querySelector("#replaySellCorrection")?.value || "",
+    humanSellLabel: advice.humanSellLabel || "",
+    sellCorrectionReason: advice.sellCorrectionReason || "",
+    autoAdviceAction: advice.autoAction || "",
+    autoAdviceText: advice.autoActionText || "",
   };
 }
 
 function replayPayload(action, reason, note, shouldWrite = replayState.writeTraining) {
   const candle = currentReplayCandle();
   const clientActionId = createReplayActionId(action, candle?.date || "");
-  const stopLoss = Number(document.querySelector("#replayStopLoss").value) || null;
-  const stopLossReason = document.querySelector("#replayStopLossReason").value.trim();
+  const stopLoss = Number(document.querySelector("#replayStopLoss")?.value) || null;
+  const stopLossReason = document.querySelector("#replayStopLossReason")?.value.trim() || "";
   const aiAdviceSnapshot = currentAiAdviceSnapshot();
+  const trained = trainingDecisionFromAdvice(aiAdviceSnapshot, action, reason, note);
+  action = trained.action;
+  reason = trained.reason;
+  note = trained.note;
   const aiAdviceDecision = inferAiAdviceFeedback(action, reason, note, aiAdviceSnapshot);
   syncManualLevelInputs();
   const nearest = nearestManualLevels();
@@ -7278,6 +7388,10 @@ function replayPayload(action, reason, note, shouldWrite = replayState.writeTrai
     aiAdviceAccepted: aiAdviceDecision.accepted,
     aiAdviceDisagreeReason: aiAdviceDecision.disagreeReason,
     aiAdviceSnapshot,
+    humanSellCorrection: trained.humanSellCorrection,
+    humanSellLabel: trained.humanSellLabel,
+    autoAdviceAction: trained.autoAdviceAction,
+    autoAdviceText: trained.autoAdviceText,
     writeTraining: shouldWrite,
     trainingEquityBefore: replayState.equity || 1,
     trainingReturnBefore: ((replayState.equity || 1) - 1) * 100,
@@ -7295,8 +7409,8 @@ async function saveReplayDecision(action) {
   const buyReason = aiAdviceSnapshot.reasonText || "";
   const stopLoss = aiStopLossSuggestion(aiAdviceSnapshot) || 0;
   const stopLossReason = `AI建议止损：${formatPrice(stopLoss)}`;
-  const sellReason = aiAdviceSnapshot.reasonText || "";
-  const holdNote = "";
+  const sellReason = aiAdviceSnapshot.sellCorrectionReason || aiAdviceSnapshot.reasonText || "";
+  const holdNote = aiAdviceSnapshot.humanSellCorrection ? (aiAdviceSnapshot.sellCorrectionReason || aiAdviceSnapshot.humanSellLabel || "") : "";
   if (action === "buy" && !buyReason) {
     setStatus("#replayStatus", "买入前需要填写买入理由。", "negative");
     return;
@@ -7309,8 +7423,12 @@ async function saveReplayDecision(action) {
     setStatus("#replayStatus", "卖出前需要填写卖出理由。", "negative");
     return;
   }
-  const reason = action === "buy" ? buyReason : action === "sell" ? sellReason : "观望";
+  let reason = action === "buy" ? buyReason : action === "sell" ? sellReason : "观望";
   let note = action === "hold" ? holdNote : reason;
+  const trained = trainingDecisionFromAdvice(aiAdviceSnapshot, action, reason, note);
+  action = trained.action;
+  reason = trained.reason;
+  note = trained.note;
   if (actionableAiAdvice && action !== aiAdviceSnapshot.action && !note) note = aiMismatchReason(action, aiAdviceSnapshot);
   const shouldWrite = shouldWriteReplayDecision(action, note);
   replayState.aiAdviceFeedback = actionableAiAdvice ? (action === aiAdviceSnapshot.action ? "accepted" : "rejected") : null;
@@ -7355,6 +7473,10 @@ async function saveReplayDecision(action) {
     aiAdviceAccepted: actionableAiAdvice ? (action === aiAdviceSnapshot.action) : null,
     aiAdviceDisagreeReason: actionableAiAdvice && action !== aiAdviceSnapshot.action ? aiMismatchReason(action, aiAdviceSnapshot) : "",
     aiAdviceSnapshot,
+    humanSellCorrection: trained.humanSellCorrection,
+    humanSellLabel: trained.humanSellLabel,
+    autoAdviceAction: trained.autoAdviceAction,
+    autoAdviceText: trained.autoAdviceText,
   });
   replayState.selectedNoteDate = note ? candle.date : null;
   if (action === "buy") {
@@ -7363,8 +7485,14 @@ async function saveReplayDecision(action) {
     document.querySelector("#replayStopLossReason").value = "";
     updateBuyStopLossVisibility();
   }
-  if (action === "sell") document.querySelector("#replaySellReason").value = "";
-  if (action === "hold") document.querySelector("#replayHoldNote").value = "";
+  if (action === "sell") {
+    const sellReasonNode = document.querySelector("#replaySellReason");
+    if (sellReasonNode) sellReasonNode.value = "";
+  }
+  if (action === "hold") {
+    const holdNoteNode = document.querySelector("#replayHoldNote");
+    if (holdNoteNode) holdNoteNode.value = "";
+  }
   resetAiAdviceFeedback();
   const previousCandle = candle;
   replayState.cursor += 1;
@@ -8930,7 +9058,7 @@ document.querySelector("#backtestDeleteSelectedLevel")?.addEventListener("click"
   syncBacktestManualLevels();
   updateBacktestLevelUi();
 });
-["#replayTrendDirection", "#replayTrendStage", "#replaySupportStatus", "#replaySupportEvidence", "#replayStructure"].forEach((selector) => {
+["#replayTrendDirection", "#replayTrendStage", "#replaySupportStatus", "#replaySupportEvidence", "#replaySellCorrection", "#replayStructure"].forEach((selector) => {
   document.querySelector(selector)?.addEventListener("change", () => renderRuleAdvice());
 });
 document.querySelector("#copyRuleAdviceSummary")?.addEventListener("click", copyRuleAdviceSummary);

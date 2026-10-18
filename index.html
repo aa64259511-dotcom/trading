@@ -421,6 +421,15 @@
                         <option value="manual_structure">人工结构判断</option>
                       </select>
                     </label>
+                    <label>卖出修正
+                      <select id="replaySellCorrection">
+                        <option value="">跟随系统卖出判断</option>
+                        <option value="stop_loss">止损</option>
+                        <option value="breakeven_stop">保本止损</option>
+                        <option value="take_profit">止盈</option>
+                        <option value="hold_no_sell">观望-不卖</option>
+                      </select>
+                    </label>
                     <label class="full-width">趋势结构说明
                       <input id="replayStructure" type="text" placeholder="说明当前结构和人工修正原因" />
                     </label>

@@ -47,6 +47,7 @@ const extracted = [
   "humanSupportPath",
   "readHumanReplaySelections",
   "applyHumanReplayOverrides",
+  "trainingDecisionFromAdvice",
   "ruleLibraryAdvice",
 ].map(extractFunction).join("\n\n");
 
@@ -151,7 +152,7 @@ ${extracted}
     return attachStructureRecognition(ruleLibraryAdvice(), history);
   }
 
-  return { analyze, recognizeMarketStructure, applyHumanReplayOverrides, version: "frontend-rule-library-v1" };
+  return { analyze, recognizeMarketStructure, applyHumanReplayOverrides, trainingDecisionFromAdvice, version: "frontend-rule-library-v1" };
 });
 `;
 
