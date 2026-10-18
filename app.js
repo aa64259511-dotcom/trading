@@ -39,6 +39,7 @@ let lastBuyAnalysis = null;
 let stockSearchTimer = null;
 let marketSearchTimer = null;
 let marketRealtimeTimer = null;
+let replayRealtimeTimer = null;
 let marketWatchlistSnapshotTimer = null;
 let marketState = {
   data: null,
@@ -126,6 +127,9 @@ let replayState = {
   autoLevelSnapshot: null,
   levelCorrections: [],
   dragLevelStart: null,
+  serverAdvice: null,
+  serverAdviceKey: "",
+  serverAdviceStatus: "idle",
 };
 
 const TIMEFRAME_LABELS = {
@@ -908,7 +912,7 @@ function renderStockSearchResults(matches = []) {
     <button class="stock-search-option" type="button" data-symbol="${escapeHtml(match.symbol)}" data-name="${escapeHtml(match.name || "")}" data-initials="${escapeHtml(match.initials || "")}" data-market="${escapeHtml(match.market || "")}" data-display-symbol="${escapeHtml(match.displaySymbol || match.symbol)}">
       <span>${escapeHtml(match.displaySymbol || match.symbol)}</span>
       <strong>${escapeHtml(match.name || "名称未收录")}</strong>
-      <small>${escapeHtml(match.market === "hk" ? "港股" : match.initials || "")}</small>
+      <small>${escapeHtml(match.market === "hk" ? "港股" : match.market === "futures" ? "期货" : match.initials || "")}</small>
     </button>
   `).join("");
   panel.classList.remove("hidden");
@@ -1058,7 +1062,12 @@ function serializeMarketLevel(level) {
 
 function marketLevelStorageKey() {
   if (!marketState.symbol) return "";
-  return `${MARKET_LEVEL_STORAGE_PREFIX}:${marketState.market || "cn"}:${marketState.symbol}`;
+  const market = String(marketState.market || "cn").toLowerCase();
+  const symbol = String(marketState.symbol).trim().toUpperCase()
+    .replace(/^HK[:._-]?/, "")
+    .replace(/^31#/, "")
+    .split(/[.:]/)[0];
+  return `${MARKET_LEVEL_STORAGE_PREFIX}:${market}:${symbol}`;
 }
 
 function defaultMarketPosition() {
@@ -1256,7 +1265,12 @@ function loadMarketLevels() {
   try {
     const key = marketLevelStorageKey();
     if (!key) return [];
-    const payload = JSON.parse(window.localStorage.getItem(key) || "null");
+    let payload = JSON.parse(window.localStorage.getItem(key) || "null");
+    if (!payload && marketState.symbol) {
+      const legacyKey = `${MARKET_LEVEL_STORAGE_PREFIX}:${marketState.market || "cn"}:${marketState.symbol}`;
+      payload = JSON.parse(window.localStorage.getItem(legacyKey) || "null");
+      if (payload) window.localStorage.setItem(key, JSON.stringify(payload));
+    }
     const levels = Array.isArray(payload?.levels) ? payload.levels : Array.isArray(payload) ? payload : [];
     return levels.map(normalizeStoredLevel).filter(Boolean).sort((a, b) => a.price - b.price);
   } catch {
@@ -1323,8 +1337,13 @@ function renderWatchlistInto(list, count) {
   };
   const itemTitle = (item) => item.name || item.displayName || item.displaySymbol || item.symbol;
   const itemMeta = (item) => {
-    const timeText = item.latestTime ? ` \u00b7 ${formatSourceTimestamp(item.latestTime)}` : "";
     const sourceText = item.latestSource === "qmt_realtime" ? " \u00b7 QMT" : "";
+    const timeText = item.latestSource === "qmt_realtime"
+      && item.latestTimeSource !== "qmt_raw"
+      ? ` \u00b7 ${formatRealtimeTimestamp(null)}`
+      : item.latestSource === "qmt_realtime"
+      ? ` \u00b7 ${formatRealtimeTimestamp(item.latestTime)}`
+      : (item.latestTime ? ` \u00b7 ${formatSourceTimestamp(item.latestTime)}` : "");
     return `${escapeHtml(item.displaySymbol || item.symbol)}${item.latestDate ? ` &middot; ${escapeHtml(item.latestDate)}` : ""}${escapeHtml(timeText)}${sourceText}`;
   };
   list.innerHTML = marketState.watchlist.map((item) => `
@@ -1397,7 +1416,7 @@ async function refreshMarketWatchlistSnapshot() {
 function startMarketWatchlistSnapshotPolling() {
   window.clearInterval(marketWatchlistSnapshotTimer);
   refreshMarketWatchlistSnapshot();
-  marketWatchlistSnapshotTimer = window.setInterval(refreshMarketWatchlistSnapshot, 5000);
+  marketWatchlistSnapshotTimer = null;
 }
 
 function setTrainingWatchlistCollapsed(collapsed) {
@@ -1882,7 +1901,7 @@ function renderMarketAiAdvice(data) {
   document.querySelector("#marketAiModel").textContent = model.model || "--";
 }
 
-function marketRuleAdvice() {
+function marketReplayAdvicePayload() {
   if (!marketState.data?.timeframes?.daily?.length) return null;
   const previous = {
     data: replayState.data,
@@ -1898,10 +1917,7 @@ function marketRuleAdvice() {
     replayState.cursor = Math.max(0, daily.length - 1);
     replayState.position = marketPositionForAdvice();
     replayState.manualLevels = marketState.manualLevels || [];
-    const advice = ruleLibraryAdvice();
-    return advice && replayState.position
-      ? { ...advice, side: "sell", sideLabel: "\u5356\u51fa\u89c2\u5bdf" }
-      : { ...advice, side: "buy", sideLabel: "\u4e70\u5165\u89c2\u5bdf" };
+    return replayServerAdviceRequestData();
   } finally {
     replayState.data = previous.data;
     replayState.frame = previous.frame;
@@ -1991,7 +2007,7 @@ async function requestMarketAiAdvice() {
       });
       return null;
     }
-    const advice = marketRuleAdvice();
+    const advice = await fetchReplayServerAdvice(marketReplayAdvicePayload());
     renderMarketRuleAdvice(advice);
     return advice;
   }
@@ -2009,10 +2025,28 @@ async function requestMarketAiAdvice() {
 function formatSourceTimestamp(value) {
   if (!value) return "--";
   const pad = (number) => String(number).padStart(2, "0");
-  if (/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return "--";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return value;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
-  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  const y = date.getFullYear();
+  const mo = pad(date.getMonth() + 1);
+  const d = pad(date.getDate());
+  const h = pad(date.getHours());
+  const mi = pad(date.getMinutes());
+  const s = pad(date.getSeconds());
+  if (h === "00" && mi === "00" && s === "00") return `${y}-${mo}-${d}`;
+  return `${y}-${mo}-${d} ${h}:${mi}:${s}`;
+}
+
+function formatRealtimeTimestamp(value) {
+  const text = String(value || "");
+  if (!text || /^\d{4}-\d{2}-\d{2}$/.test(text)) return "\u0051MT\u672a\u8fd4\u56de\u65f6\u5206\u79d2";
+  const formatted = formatSourceTimestamp(text);
+  return /^\d{4}-\d{2}-\d{2}$/.test(formatted) ? "\u0051MT\u672a\u8fd4\u56de\u65f6\u5206\u79d2" : formatted;
+}
+
+function qmtRawQuoteTime(record) {
+  return record?.quoteTimeSource ? record.quoteTime : null;
 }
 
 function currentRealtimeSubscriptionItem() {
@@ -2029,23 +2063,30 @@ function currentWatchlistItem() {
 function marketQuoteSourceText() {
   const quote = marketState.realtimeQuote;
   const watchItem = currentWatchlistItem();
-  const quoteTime = formatSourceTimestamp(quote?.receivedAt || (watchItem?.latestSource === "qmt_realtime" ? watchItem.latestTime : null));
-  const watched = isMarketWatchlisted();
-  if (!watched) {
-    return `\u6570\u636e\u6765\u6e90\uff1a\u672c\u5730K\u7ebf \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a-- \u00b7 \u8ba2\u9605\uff1a\u672a\u52a0\u5165\u81ea\u9009\uff0c\u672a\u8ba2\u9605`;
-  }
+  const hasWatchQmt = watchItem?.latestSource === "qmt_realtime";
+  const qmtTime = hasWatchQmt && watchItem.latestTimeSource === "qmt_raw" ? watchItem.latestTime : null;
   const subscription = currentRealtimeSubscriptionItem();
   const subscriptionTime = formatSourceTimestamp(subscription?.updatedAt || marketState.realtimeWatchStatus?.updatedAt);
+  const watched = isMarketWatchlisted();
+
+  // helper: best available timestamp for "\u83b7\u53d6\u65f6\u95f4"
+  const rawBestTime = quote ? qmtRawQuoteTime(quote) : (hasWatchQmt ? qmtTime : (subscription?.updatedAt || marketState.realtimeWatchStatus?.updatedAt));
+  const bestTime = (quote || hasWatchQmt) ? formatRealtimeTimestamp(rawBestTime) : formatSourceTimestamp(rawBestTime);
+  const timeText = bestTime !== "--" ? bestTime : "";
+
+  if (!watched) {
+    return `\u6570\u636e\u6765\u6e90\uff1a\u672c\u5730K\u7ebf${timeText ? ` \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a${timeText}` : " \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a--"} \u00b7 \u8ba2\u9605\uff1a\u672a\u52a0\u5165\u81ea\u9009\uff0c\u672a\u8ba2\u9605`;
+  }
   if (!subscription) {
-    return `\u6570\u636e\u6765\u6e90\uff1a\u672c\u5730K\u7ebf \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a-- \u00b7 \u8ba2\u9605\uff1a\u540c\u6b65\u4e2d`;
+    return `\u6570\u636e\u6765\u6e90\uff1a\u672c\u5730K\u7ebf${timeText ? ` \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a${timeText}` : " \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a--"} \u00b7 \u8ba2\u9605\uff1a\u540c\u6b65\u4e2d`;
   }
   if (!quote) {
-    if (watchItem?.latestSource === "qmt_realtime" && watchItem.latestTime) {
-      return `\u6570\u636e\u6765\u6e90\uff1aQMT\u5b9e\u65f6\u884c\u60c5 \u00b7 \u884c\u60c5\u65e5\u671f\uff1a${watchItem.latestDate || "--"} \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a${quoteTime} \u00b7 \u8ba2\u9605\uff1a\u5df2\u8ba2\u9605`;
+    if (hasWatchQmt) {
+      return `\u6570\u636e\u6765\u6e90\uff1aQMT\u5b9e\u65f6\u884c\u60c5 \u00b7 \u884c\u60c5\u65e5\u671f\uff1a${watchItem.latestDate || "--"} \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a${bestTime} \u00b7 \u8ba2\u9605\uff1a\u5df2\u8ba2\u9605`;
     }
-    return `\u6570\u636e\u6765\u6e90\uff1a\u672c\u5730K\u7ebf \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a-- \u00b7 \u8ba2\u9605\uff1a\u5df2\u8bf7\u6c42QMT\u8ba2\u9605\uff0c\u7b49\u5f85\u6865\u63a5 \u00b7 \u8ba2\u9605\u65f6\u95f4\uff1a${subscriptionTime}`;
+    return `\u6570\u636e\u6765\u6e90\uff1a\u672c\u5730K\u7ebf${timeText ? ` \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a${timeText}` : " \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a--"} \u00b7 \u8ba2\u9605\uff1a\u5df2\u8bf7\u6c42QMT\u8ba2\u9605\uff0c\u7b49\u5f85\u6865\u63a5 \u00b7 \u8ba2\u9605\u65f6\u95f4\uff1a${subscriptionTime}`;
   }
-  return `\u6570\u636e\u6765\u6e90\uff1aQMT\u5b9e\u65f6\u884c\u60c5 \u00b7 \u884c\u60c5\u65e5\u671f\uff1a${quote.trade_date || "--"} \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a${quoteTime} \u00b7 \u8ba2\u9605\uff1a\u5df2\u8ba2\u9605`;
+  return `\u6570\u636e\u6765\u6e90\uff1aQMT\u5b9e\u65f6\u884c\u60c5 \u00b7 \u884c\u60c5\u65e5\u671f\uff1a${quote.trade_date || "--"} \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a${bestTime} \u00b7 \u8ba2\u9605\uff1a\u5df2\u8ba2\u9605`;
 }
 
 function applyMarketRealtimeQuote(quote) {
@@ -2061,7 +2102,9 @@ function applyMarketRealtimeQuote(quote) {
     volume: quote.volume || 0,
     amount: quote.amount || 0,
     source: quote.source || "qmt_realtime",
-    receivedAt: quote.receivedAt || new Date().toISOString(),
+    receivedAt: quote.receivedAt || null,
+    quoteTime: qmtRawQuoteTime(quote),
+    quoteTimeSource: quote.quoteTimeSource || null,
     realtime: true,
   };
   const last = daily.at(-1);
@@ -2071,6 +2114,66 @@ function applyMarketRealtimeQuote(quote) {
     daily.push(row);
   }
 }
+
+function applyReplayRealtimeQuote(quote) {
+  if (!quote || !replayState.data?.timeframes?.daily) return false;
+  const daily = replayState.data.timeframes.daily;
+  const currentDate = currentReplayCandle()?.date || "";
+  const row = {
+    date: quote.trade_date,
+    open: quote.open,
+    high: quote.high,
+    low: quote.low,
+    close: quote.close,
+    volume: quote.volume || 0,
+    amount: quote.amount || 0,
+    source: quote.source || "qmt_realtime",
+    receivedAt: quote.receivedAt || null,
+    quoteTime: qmtRawQuoteTime(quote),
+    quoteTimeSource: quote.quoteTimeSource || null,
+    realtime: true,
+  };
+  const index = daily.findIndex((item) => item.date === row.date);
+  if (index >= 0) {
+    daily[index] = { ...daily[index], ...row };
+  } else {
+    daily.push(row);
+    daily.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  }
+  // Realtime polling must update the latest bar without pulling a user back to it
+  // after they have navigated to a previous trading day.
+  const preservedIndex = currentDate ? daily.findIndex((item) => item.date === currentDate) : -1;
+  replayState.cursor = preservedIndex >= 0
+    ? preservedIndex
+    : Math.min(replayState.cursor || 0, daily.length - 1);
+  replayState.data.timeframes.weekly = dailyToWeeklyCandles(daily);
+  replayState.data.timeframes.monthly = dailyToMonthlyCandles(daily);
+  return true;
+}
+
+async function refreshReplayRealtimeQuote({ redraw = true } = {}) {
+  const data = replayState.data;
+  if (!data?.symbol) return null;
+  try {
+    const url = `/api/realtime-quote?symbol=${encodeURIComponent(data.symbol)}&market=${encodeURIComponent(data.market || "")}`;
+    const response = await fetch(apiUrl(url), { cache: "no-store" });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "realtime quote failed");
+    const quote = payload.quote || null;
+    if (applyReplayRealtimeQuote(quote) && redraw) updateReplayUi();
+    return quote;
+  } catch {
+    return null;
+  }
+}
+
+function startReplayRealtimePolling() {
+  window.clearInterval(replayRealtimeTimer);
+  if (!replayState.data?.symbol) return;
+  refreshReplayRealtimeQuote({ redraw: true });
+  replayRealtimeTimer = null;
+}
+
 
 async function refreshMarketRealtimeQuote({ redraw = true } = {}) {
   await refreshMarketRealtimeSubscriptionStatus();
@@ -2097,10 +2200,56 @@ async function refreshMarketRealtimeQuote({ redraw = true } = {}) {
 
 function startMarketRealtimePolling() {
   window.clearInterval(marketRealtimeTimer);
-  if (!marketState.symbol || !isMarketWatchlisted()) return;
-  marketRealtimeTimer = window.setInterval(() => {
-    if (activeView === "market" || activeView === "replay") refreshMarketRealtimeQuote();
-  }, 5000);
+  marketRealtimeTimer = null;
+}
+
+async function refreshWatchlistQuotes() {
+  const button = document.querySelector("#refreshTrainingWatchlist");
+  const previousText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "刷新中...";
+  }
+  try {
+    await syncMarketRealtimeWatchlist();
+    const requestResponse = await fetch(apiUrl("/api/realtime-refresh"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const refreshPayload = await requestResponse.json().catch(() => ({}));
+    if (!requestResponse.ok) throw new Error(refreshPayload.error || "实时行情刷新失败");
+    await refreshMarketWatchlistSnapshot();
+    renderMarketWatchlist();
+    setStatus("#replayStatus", "股票池行情已刷新。", "positive");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = previousText;
+    }
+  }
+}
+
+window.addEventListener("beforeunload", () => {
+  if (marketState.symbol && (marketState.manualLevels || []).length) saveMarketLevels();
+});
+
+async function fillWatchlistHistory() {
+  const button = document.querySelector("#getTrainingWatchlist");
+  const previousText = button?.textContent;
+  if (button) { button.disabled = true; button.textContent = "获取中..."; }
+  try {
+    await syncMarketRealtimeWatchlist();
+    const response = await fetch(apiUrl("/api/fill-watchlist-history"), { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "历史行情获取失败");
+    if (marketState.symbol && isMarketWatchlisted()) await loadMarketSymbol(marketState.symbol, marketState.market);
+    await refreshMarketWatchlistSnapshot();
+    renderMarketWatchlist();
+    setStatus("#replayStatus", `已补充 ${result.inserted || 0} 条 A 股缺失日线。`, "positive");
+  } finally {
+    if (button) { button.disabled = false; button.textContent = previousText; }
+  }
 }
 
 async function loadMarketSymbol(symbol, market = null, meta = {}) {
@@ -2523,12 +2672,19 @@ function createTrainingSessionId(symbol, date) {
 
 function displaySecuritySymbol(data, fallback = "--") {
   if (!data) return fallback;
-  return data.displaySymbol || (data.market === "hk" && data.symbol ? `HK:${data.symbol}` : data.symbol) || fallback;
+  return data.displaySymbol || (data.market === "hk" ? `HK:${data.symbol}` : data.market === "futures" ? `FUT:${data.symbol}` : data.symbol) || fallback;
 }
 
 function replayQuoteStatusText(candle) {
   const label = timeframeLabel(replayState.frame);
-  const timeText = candle?.receivedAt ? formatSourceTimestamp(candle.receivedAt) : formatSourceTimestamp(candle?.date);
+  if (replayState.blindMode) {
+    if (["5m", "30m", "60m"].includes(replayState.frame)) {
+      return candle ? `\u672c\u5730${label}` : `${label}\u672a\u5bfc\u5165`;
+    }
+    return candle?.realtime ? "QMT\u5b9e\u65f6\u884c\u60c5" : `\u672c\u5730${label}`;
+  }
+  const rawTime = candle?.realtime ? qmtRawQuoteTime(candle) : candle?.date;
+  const timeText = candle?.realtime ? formatRealtimeTimestamp(rawTime) : formatSourceTimestamp(rawTime);
   if (["5m", "30m", "60m"].includes(replayState.frame)) {
     return candle ? `\u672c\u5730${label} \u00b7 \u83b7\u53d6\u65f6\u95f4\uff1a${timeText}` : `${label}\u672a\u5bfc\u5165`;
   }
@@ -2806,6 +2962,10 @@ async function restoreTrainingRecord(recordId) {
   replayState.sessionId = dataset.id;
   replayState.trainingStartDate = dataset.startDate || first.date || "";
   document.querySelector("#replayStructure").value = focus.structure || first.structure || "";
+  document.querySelector("#replayTrendDirection").value = focus.humanTrendDirection || first.humanTrendDirection || "";
+  document.querySelector("#replayTrendStage").value = focus.humanTrendStage || first.humanTrendStage || "";
+  document.querySelector("#replaySupportStatus").value = focus.supportStatus || first.supportStatus || "";
+  document.querySelector("#replaySupportEvidence").value = focus.supportValidationEvidence || first.supportValidationEvidence || "";
   updateReplayUi();
   setView("replay");
   setStatus("#replayStatus", `已复现训练集：${displaySecuritySymbol(dataset, dataset.symbol || first.symbol)} ${dataset.startDate || first.date}`, "positive");
@@ -2892,6 +3052,7 @@ function candleStep(canvasWidth, candleCount) {
 
 const LEVEL_ROLE_LABELS = {
   support: "\u652f\u6491",
+  pending_support: "\u5f85\u56de\u8e29\u786e\u8ba4\u652f\u6491",
   near_resistance: "\u8fd1\u7aef\u538b\u529b",
   effective_resistance: "\u6709\u6548\u538b\u529b",
   breakout_target: "\u7a81\u7834\u76ee\u6807",
@@ -2902,7 +3063,7 @@ function levelRoleLabel(role) {
 }
 
 function levelSideFromRole(role) {
-  return role === "support" ? "support" : "resistance";
+  return ["support", "pending_support"].includes(role) ? "support" : "resistance";
 }
 
 function inferredLevelRole(level) {
@@ -2914,6 +3075,7 @@ function inferredLevelRole(level) {
 
 function ensureLevelRole(level) {
   if (level && !LEVEL_ROLE_LABELS[level.role]) level.role = inferredLevelRole(level);
+  if (level && !level.validationStatus) level.validationStatus = level.auto ? "candidate" : "testing";
   return level;
 }
 
@@ -2925,7 +3087,7 @@ function nearestManualLevels() {
   const current = currentReplayCandle()?.close || 0;
   const levels = (replayState.manualLevels || []).map(ensureLevelRole).filter((level) => Number(level.price) > 0);
   const supports = levels
-    .filter((level) => level.price <= current || inferredLevelRole(level) === "support")
+    .filter((level) => inferredLevelRole(level) === "support")
     .filter((level) => level.price <= current)
     .sort((a, b) => b.price - a.price);
   const pressureLevels = levels
@@ -2986,6 +3148,7 @@ function serializeLevel(level) {
     side: levelSideFromRole(role),
     role,
     roleLabel: levelRoleLabel(role),
+    validationStatus: level.validationStatus || (role === "pending_support" ? "testing" : "candidate"),
     reason: level.reason || "",
     auto: Boolean(level.auto),
     score: level.score ?? null,
@@ -3853,6 +4016,7 @@ function autoDrawLevelLines({ silent = false } = {}) {
       reason: level.reason,
       auto: true,
       score: level.score ?? null,
+      validationStatus: "candidate",
     });
     addedCount += 1;
   });
@@ -3894,32 +4058,94 @@ function convertBrokenPressureToSupport(previousCandle, candle) {
   const previousClose = Number(previousCandle.close) || 0;
   const currentClose = Number(candle.close) || 0;
   if (previousClose <= 0 || currentClose <= 0) return "";
-  const converted = [];
+  const changed = [];
+  const currentCandle = candle;
   replayState.manualLevels.forEach((level) => {
     ensureLevelRole(level);
     const price = Number(level.price) || 0;
+    if (!price) return;
     const previousRole = inferredLevelRole(level);
-    if (!price || previousRole === "support") return;
-    if (previousClose <= price && currentClose > price) {
-      level.role = "support";
-      if (!String(level.reason || "").includes("突破后转支撑")) {
-        level.reason = level.reason ? `${level.reason}；突破后转支撑` : "突破压力后转支撑";
+
+    // 突破压力 -> 支撑
+    if (!["support", "pending_support"].includes(previousRole) && previousClose <= price && currentClose > price) {
+      level.role = "pending_support";
+      level.validationStatus = "testing";
+      if (!String(level.reason || "").includes("等待回踩确认")) {
+        level.reason = level.reason ? `${level.reason}；突破后等待回踩确认` : "突破压力后等待回踩确认";
       }
       recordLevelCorrection("role_change", level, {
-        fromPrice: price,
-        toPrice: price,
-        side: "support",
-        role: "support",
-        previousRole,
-        reason: level.reason,
+        fromPrice: price, toPrice: price, side: "support", role: "pending_support", previousRole, reason: level.reason,
       });
-      converted.push(price);
+      changed.push({ price, direction: "突破压力", newRole: "待回踩确认支撑" });
+    }
+    if (previousRole === "pending_support"
+      && currentClose >= price * 0.995
+      && currentClose <= price * 1.02
+      && currentClose >= Number(currentCandle.open || 0)) {
+      level.role = "support";
+      level.validationStatus = "validated";
+      level.reason = level.reason ? `${level.reason}；回踩确认支撑` : "突破后回踩确认支撑";
+      recordLevelCorrection("role_change", level, {
+        fromPrice: price, toPrice: price, side: "support", role: "support", previousRole, reason: level.reason,
+      });
+      changed.push({ price, direction: "突破后回踩", newRole: "支撑" });
+    }
+    // 跌破支撑 -> 有效压力
+    if (["support", "pending_support"].includes(previousRole) && previousClose >= price && currentClose < price) {
+      level.role = "effective_resistance";
+      level.validationStatus = "broken";
+      if (!String(level.reason || "").includes("跌破后转压力")) {
+        level.reason = level.reason ? `${level.reason}；跌破后转压力` : "跌破支撑后转压力";
+      }
+      recordLevelCorrection("role_change", level, {
+        fromPrice: price, toPrice: price, side: "resistance", role: "effective_resistance", previousRole, reason: level.reason,
+      });
+      changed.push({ price, direction: "跌破支撑", newRole: "有效压力" });
     }
   });
-  if (!converted.length) return "";
+  if (!changed.length) return "";
   saveReplayLevels();
-  const prices = converted.sort((a, b) => a - b).map((price) => formatPrice(price)).join("、");
-  return `压力 ${prices} 已突破，自动转为支撑。`;
+  const messages = changed.map((c) => `${c.direction} ${formatPrice(c.price)}，转为${c.newRole}。`).join("");
+  return messages;
+}
+
+function updateDynamicLevelValidation(previousCandle, candle) {
+  if (!candle || !replayState.manualLevels.length) return "";
+  const current = Number(candle.close) || 0;
+  if (current <= 0) return "";
+  const recent = (replayState.data?.timeframes?.daily || [])
+    .slice(0, replayState.cursor + 1)
+    .slice(-30);
+  const messages = [];
+  replayState.manualLevels.forEach((level) => {
+    ensureLevelRole(level);
+    const price = Number(level.price) || 0;
+    if (!price) return;
+    const role = inferredLevelRole(level);
+    const near = Math.abs(current - price) / price <= 0.025;
+    const bullish = Number(candle.close) >= Number(candle.open);
+    const bearish = Number(candle.close) <= Number(candle.open);
+    const supportTests = recent.filter((item) => Number(item.low) <= price * 1.015 && Number(item.close) >= price * 0.995).length;
+    const resistanceTests = recent.filter((item) => Number(item.high) >= price * 0.985 && Number(item.close) <= price * 1.005).length;
+    if (role === "support" && level.validationStatus !== "broken") {
+      if (near && level.validationStatus === "candidate") level.validationStatus = "testing";
+      if (supportTests >= 2 && bullish && Number(candle.close) >= price * 0.995) {
+        if (level.validationStatus !== "validated") messages.push(`支撑 ${formatPrice(price)} 完成回踩确认`);
+        level.validationStatus = "validated";
+      }
+      if (previousCandle && Number(previousCandle.close) >= price && current < price * 0.99) {
+        level.validationStatus = "broken";
+        level.reason = level.reason ? `${level.reason}；收盘跌破待重新验证` : "收盘跌破，原支撑失效";
+      }
+    }
+    if (role !== "support" && level.validationStatus !== "broken") {
+      if (near && level.validationStatus === "candidate") level.validationStatus = "testing";
+      if (resistanceTests >= 2 && bearish && current <= price * 1.005) level.validationStatus = "validated";
+    }
+  });
+  if (!messages.length) return "";
+  saveReplayLevels();
+  return messages.join("；");
 }
 
 function autoDrawAfterLevelBreak(previousCandle, candle) {
@@ -4025,6 +4251,7 @@ function ruleLibraryAdvice() {
   }
   const recent = history.slice(-30);
   const prev = history.at(-2);
+  const prev2 = history.at(-3);
   const last20 = history.slice(-20);
   const last60 = history.slice(-60);
   const last120 = history.slice(-120);
@@ -4034,6 +4261,19 @@ function ruleLibraryAdvice() {
   const ma20 = average(history.slice(-20), (item) => item.close);
   const ma60 = average(history.slice(-60), (item) => item.close);
   const ma120 = average(history.slice(-120), (item) => item.close);
+  const weeklyHistory = dailyToWeeklyCandles(history);
+  const weeklyMa10 = average(weeklyHistory.slice(-10), (item) => item.close);
+  const weeklyMa30 = average(weeklyHistory.slice(-30), (item) => item.close);
+  const weeklyMa30TenWeeksAgo = weeklyHistory.length >= 40
+    ? average(weeklyHistory.slice(-40, -10), (item) => item.close)
+    : weeklyMa30;
+  const weeklyLastClose = weeklyHistory.at(-1)?.close || candle.close;
+  const weeklyDownScore = [
+    weeklyLastClose < weeklyMa30,
+    weeklyMa10 < weeklyMa30,
+    weeklyMa30TenWeeksAgo > 0 && (weeklyMa30 - weeklyMa30TenWeeksAgo) / weeklyMa30TenWeeksAgo < -0.01,
+  ].filter(Boolean).length;
+  const weeklyDowntrend = weeklyHistory.length >= 30 && weeklyDownScore >= 2;
   const high20 = Math.max(...last20.slice(0, -1).map((item) => item.high));
   const low20 = Math.min(...last20.map((item) => item.low));
   const high60 = Math.max(...last60.map((item) => item.high));
@@ -4050,9 +4290,28 @@ function ruleLibraryAdvice() {
   const reclaimHasEnoughSpace = reclaimSpacePct >= 0.025;
   const bullish = candle.close > candle.open;
   const bearish = candle.close < candle.open;
-  const shrinkVolume = history.length >= 25 && candle.volume < average(history.slice(-20), (item) => item.volume);
+  const candleRange = Math.max(candle.high - candle.low, 0.001);
+  const bearishBodyPct = candle.open > 0 ? (candle.open - candle.close) / candle.open : 0;
+  const closeLocationInRange = (candle.close - candle.low) / candleRange;
+  const bearishConfirmationFailure = bearish && bearishBodyPct >= 0.03 && closeLocationInRange <= 0.35;
+  const averageVolume20 = history.length >= 25 ? average(history.slice(-20), (item) => item.volume) : 0;
+  const volumeRatio20 = averageVolume20 > 0 ? (Number(candle.volume) || 0) / averageVolume20 : 1;
+  const shrinkVolume = averageVolume20 > 0 && candle.volume < averageVolume20;
+  const supportTouched = supportPrice ? candle.low <= supportPrice * 1.015 : false;
+  const supportVolumeTooHigh = supportTouched && (volumeRatio20 >= 2 || (volumeRatio20 >= 1.5 && !bullish));
   const breakout20 = candle.close > high20;
+  const candleRisePct = prev && prev.close > 0 ? (candle.close - prev.close) / prev.close : 0;
+  const prevRisePct = prev2 && prev2.close > 0 && prev ? (prev.close - prev2.close) / prev2.close : 0;
+  const twoDayRisePct = prev2 && prev2.close > 0 ? (candle.close - prev2.close) / prev2.close : 0;
+  const consecutiveSurge = Boolean(
+    prev
+      && prev2
+      && bullish
+      && prev.close > prev.open
+      && (candleRisePct >= 0.04 || prevRisePct >= 0.04 || twoDayRisePct >= 0.08)
+  );
   const bigDrop = high60 > 0 && (high60 - low20) / high60 >= 0.18;
+  const uptrendAcuteDrop = bigDrop && high60 > ma60 && ma20 >= ma60 * 0.95 && candle.close >= ma120 * 0.9;
   const twoUp = prev && prev.close > prev.open && bullish && candle.close > prev.close;
   const upStructure = candle.close > ma20 && ma5 >= ma10 && ma10 >= ma20;
   const weakStructure = candle.close < ma20 && ma5 < ma10;
@@ -4065,7 +4324,24 @@ function ruleLibraryAdvice() {
   const longCycleDrawdown = high250 > 0 && (high250 - candle.close) / high250 >= 0.35;
   const longTermPressure = candle.close < ma60 || candle.close < ma120;
   const recoveryAttempt = candle.close > ma20 || twoUp || reclaimedSupport || breakout20;
+  const longTrendFlat = Math.abs(ma20 - ma60) / Math.max(candle.close, 0.01) <= 0.08 || (ma5 >= ma10 && ma10 >= ma20);
+  const longDowntrendContext = longTermPressure && (longDrawdown || mediumLongDrawdown || longCycleDrawdown);
   const longDowntrendRepair = longTermPressure && recoveryAttempt && candle.close >= ma20 && (longDrawdown || mediumLongDrawdown || longCycleDrawdown);
+  const prior60 = history.slice(-81, -1).slice(-60);
+  const priorHigh60 = prior60.length ? Math.max(...prior60.map((item) => item.high)) : 0;
+  const priorHighIndex = prior60.findIndex((item) => item.high === priorHigh60);
+  const beforePriorHigh = priorHighIndex >= 0 ? prior60.slice(Math.max(0, priorHighIndex - 44), priorHighIndex + 1) : [];
+  const priorLowBeforeHigh = beforePriorHigh.length ? Math.min(...beforePriorHigh.map((item) => item.low)) : 0;
+  const priorUpGainPct = priorLowBeforeHigh > 0 ? (priorHigh60 - priorLowBeforeHigh) / priorLowBeforeHigh : 0;
+  const dropFromPriorHighPct = priorHigh60 > 0 ? (priorHigh60 - low20) / priorHigh60 : 0;
+  const priorUpThenFastDrop = priorUpGainPct >= 0.18 && dropFromPriorHighPct >= 0.12;
+  const recent45 = history.slice(-45);
+  const recent45Low = recent45.length ? Math.min(...recent45.map((item) => item.low)) : 0;
+  const earlier45Low = recent45.length > 10 ? Math.min(...recent45.slice(0, -10).slice(-35).map((item) => item.low)) : recent45Low;
+  const lowNoLongerFalls = recent45Low >= earlier45Low * 0.97;
+  const bottomTouchHits = recent45Low > 0
+    ? recent45.filter((item) => item.low <= recent45Low * 1.03).length
+    : 0;
   const previous5 = history.slice(-6, -1);
   const platformHigh5 = previous5.length ? Math.max(...previous5.map((item) => item.high)) : 0;
   const platformLow5 = previous5.length ? Math.min(...previous5.map((item) => item.low)) : 0;
@@ -4073,17 +4349,163 @@ function ruleLibraryAdvice() {
   const currentSupportConfirm = supportPrice && prev
     ? bullish && candle.low <= supportPrice * 1.005 && candle.close > supportPrice && candle.close > prev.close && reclaimSpacePct >= 0.012
     : false;
-  const previousSupportRetestHeld = supportPrice
-    ? previous5.some((item) => item.low <= supportPrice * 1.015 && item.close >= supportPrice * 0.995) && candle.close >= supportPrice
+  const lastSupportBreachIndex = supportPrice
+    ? recent.slice(0, -1).reduce((found, item, index) => item.low < supportPrice * 0.995 ? index : found, -1)
+    : -1;
+  const afterSupportBreach = lastSupportBreachIndex >= 0 ? recent.slice(lastSupportBreachIndex + 1) : [];
+  const multiDayReclaimConfirm = supportPrice
+    ? afterSupportBreach.length >= 2
+      && afterSupportBreach.every((item) => item.close >= supportPrice * 0.995)
+      && bullish
+      && candle.close > supportPrice * 1.006
+      && reclaimSpacePct >= 0.02
+      && candle.close >= Math.max(...recent.slice(0, -1).slice(-10).map((item) => item.high)) * 0.995
+      && volumeRatio20 <= 1.5
     : false;
-  const supportRetestHeld = previousSupportRetestHeld || currentSupportConfirm;
+  const previousSupportRetestHeld = supportPrice && lastSupportBreachIndex >= 0
+    ? recent.slice(lastSupportBreachIndex + 1, -1)
+      .some((item) => item.low <= supportPrice * 1.02 && item.close >= supportPrice * 0.995)
+    : false;
+  const currentSupportRetestHeld = supportPrice
+    ? candle.low <= supportPrice * 1.02 && candle.close >= supportPrice * 0.995
+    : false;
+  const priorSupportReclaimConfirmed = supportPrice
+    ? lastSupportBreachIndex >= 0
+      && recent[lastSupportBreachIndex].close >= supportPrice * 0.995
+      && recent[lastSupportBreachIndex].low < supportPrice * 0.995
+    : false;
+  const priorBreachThenReclaim = supportPrice
+    ? recent.slice(0, -1).some((item, index, items) =>
+      item.close < supportPrice * 0.995
+      && items.slice(index + 1).some((later) => later.close >= supportPrice * 1.006))
+    : false;
+  const compositeReclaimConfirm = supportPrice
+    ? bullish
+      && candle.low < supportPrice
+      && candle.close > supportPrice
+      && recent.slice(0, -1).some((item) => item.low < supportPrice * 0.995)
+      && previous5.some((item) => item.low <= supportPrice * 1.02 && item.close >= supportPrice * 0.98)
+    : false;
+  const supportRetestHeld = previousSupportRetestHeld || currentSupportRetestHeld || currentSupportConfirm || compositeReclaimConfirm || multiDayReclaimConfirm;
   const repairConfirmed = supportRetestHeld || (smallPlatform && bullish) || twoUp || (breakout20 && bullish);
-  const shortTrendUp = candle.close >= ma5 && (ma5 >= ma10 || twoUp || reclaimedSupport || supportRetestHeld || (breakout20 && bullish));
-  const denseZonePullbackConfirm = supportRetestHeld && bullish && (shrinkVolume || currentSupportConfirm) && shortTrendUp;
-  const allowBreakoutPressure = Boolean(nearest.breakoutTarget && shortTrendUp && (denseZonePullbackConfirm || (breakout20 && bullish && shrinkVolume) || (supportRetestHeld && shrinkVolume)));
+  const supportPiercedAndReclaimed = supportPrice
+    ? recent.slice(0, -1).some((item) => item.close < supportPrice * 0.995)
+      && candle.close > supportPrice
+    : false;
+  const closeBelowThenReclaimed = supportPrice && prev
+    ? prev.close < supportPrice * 0.995 && candle.close > supportPrice
+    : false;
+  const closeBelowReclaimThenRetestConfirm = supportPrice
+    ? recent.slice(0, -1).some((item, index, items) => {
+      const reclaim = items[index + 1];
+      return item.close < supportPrice * 0.995
+        && reclaim
+        && reclaim.close > supportPrice
+        && bullish
+        && candle.low <= supportPrice * 1.02
+        && candle.close > supportPrice
+        && candle.close > prev.close;
+    })
+    : false;
+  const reclaimNextCandleConfirmed = supportPrice && prev
+    ? prev.low < supportPrice * 0.995
+      && prev.close > supportPrice
+      && bullish
+      && candle.close > prev.close
+      && candle.close > supportPrice
+    : false;
+  const priorReclaimNextCandleConfirmed = supportPrice
+    ? recent.slice(0, -2).some((item, index, items) => {
+      const next = items[index + 1];
+      return item.close < supportPrice * 0.995
+        && next
+        && next.close > next.open
+        && next.close > item.close
+        && next.close > supportPrice;
+    })
+    : false;
+  const supportBreachedDeep = supportPrice ? Math.min(...recent.slice(0, -1).map((item) => item.low)) <= supportPrice * 0.96 : false;
+  const priorPullbackVolume = previous5.length ? average(previous5, (item) => item.volume) : 0;
+  const priorBaseVolume = recent.length >= 12 ? average(recent.slice(0, -1).slice(-12), (item) => item.volume) : 0;
+  const priorPullbackShrunk = priorBaseVolume > 0 && priorPullbackVolume <= priorBaseVolume * 1.05;
+  const confirmationVolumeAccepted = shrinkVolume || (bullish && priorPullbackShrunk && volumeRatio20 < 2);
+  const pullbackReclaimConfirm = Boolean(
+    supportPrice
+      && bullish
+      && prev
+      && candle.close > prev.close
+      && candle.low < supportPrice
+      && candle.close > supportPrice
+      && (recent.slice(0, -1).some((item) => item.low < supportPrice * 0.995) || closeBelowThenReclaimed)
+  );
+  const shrinkBullishRetestConfirm = Boolean(
+    supportPrice
+      && bullish
+      && currentSupportRetestHeld
+      && confirmationVolumeAccepted
+      && (!prev || candle.close > prev.close)
+  );
+  const stableAfterAcuteDrop = supportRetestHeld && (smallPlatform || currentSupportConfirm || confirmationVolumeAccepted);
+  const volumeOkForBottomConfirm = volumeRatio20 <= 1.5;
+  const volumeOkForMultiBottom = volumeRatio20 <= 2.0;
+  const shortHighBreak = candle.high >= high20 * 0.995 || candle.close >= high20 * 0.995 || candle.high >= Math.max(...recent.slice(0, -1).slice(-10).map((item) => item.high)) * 0.995;
+  const multiBottomConfirm = longDowntrendContext
+    && bottomTouchHits >= 2
+    && (longTrendFlat || ma20 <= ma60 * 1.01)
+    && candle.close > ma20
+    && ma5 > ma10
+    && volumeOkForMultiBottom
+    && shortHighBreak
+    && lowNoLongerFalls;
+  const longBottomReclaimConfirm = Boolean(
+    longDowntrendContext
+      && supportBreachedDeep
+      && reclaimSpacePct >= 0.03
+      && candle.close > ma20
+      && ma5 > ma10
+      && priorPullbackShrunk
+      && volumeOkForBottomConfirm
+      && shortHighBreak
+  );
+  const platformShrinkConfirm = smallPlatform && priorPullbackShrunk && volumeOkForBottomConfirm;
+  const validationCountAfterUpDrop = [
+    priorSupportReclaimConfirmed || supportPiercedAndReclaimed || (supportBreachedDeep && reclaimSpacePct >= 0.03),
+    previousSupportRetestHeld || currentSupportRetestHeld,
+    platformShrinkConfirm,
+  ].filter(Boolean).length;
+  const continuationStructureConfirmed = Boolean(
+    priorSupportReclaimConfirmed
+      && (previousSupportRetestHeld || currentSupportRetestHeld)
+      && candle.close >= supportPrice
+      && confirmationVolumeAccepted
+      && !bearishConfirmationFailure
+  );
+  const longDowntrendSecondConfirm = longDowntrendContext
+    && (multiBottomConfirm || !priorUpThenFastDrop || validationCountAfterUpDrop >= 2)
+    && (
+      longBottomReclaimConfirm
+      || compositeReclaimConfirm
+      || multiBottomConfirm
+      || (supportPiercedAndReclaimed && supportRetestHeld && bullish && confirmationVolumeAccepted)
+      || closeBelowReclaimThenRetestConfirm
+      || (smallPlatform && confirmationVolumeAccepted && currentSupportConfirm)
+    );
+  const shortStructureUp = ma5 >= ma10 || twoUp || reclaimedSupport || supportRetestHeld || (breakout20 && bullish);
+  const aboveMa5 = candle.close >= ma5;
+  const shortTrendUp = aboveMa5 && shortStructureUp;
+  const denseZonePullbackConfirm = supportRetestHeld && bullish && (confirmationVolumeAccepted || currentSupportConfirm || compositeReclaimConfirm || multiDayReclaimConfirm) && shortStructureUp;
+  const allowBreakoutPressure = Boolean(nearest.breakoutTarget && shortStructureUp && (denseZonePullbackConfirm || (breakout20 && bullish && shrinkVolume) || (supportRetestHeld && shrinkVolume)));
   const pressurePlan = pressurePlanFromLevels(nearest, { allowBreakout: allowBreakoutPressure });
   const resistance = pressurePlan.level;
   const resistancePrice = pressurePlan.price;
+  const breaksUpperPressureWithoutRetest = Boolean(
+    resistancePrice
+      && consecutiveSurge
+      && (breakout20 || candle.close > resistancePrice)
+      && prev
+      && prev.close < resistancePrice
+      && candle.close > resistancePrice
+  );
   const conservativeResistancePrice = pressurePlan.conservative?.price || null;
   const nearResistancePrice = nearest.nearResistance?.price || nearest.resistance?.price || null;
   const nearResistance = nearResistancePrice ? Math.abs(nearResistancePrice - candle.close) / candle.close <= 0.04 : false;
@@ -4113,7 +4535,9 @@ function ruleLibraryAdvice() {
     const laterHeld = !laterItems.length || laterItems.every((next) => next.close >= item.low * 0.995);
     if (isKeyBullish && nearStructure && laterHeld) {
       const labelDate = item.date ? `${item.date} ` : "";
-      addBuyStopCandidate(item.open, `${labelDate}关键阳线开盘价`, 10);
+      if (!supportPrice || item.open < supportPrice * 0.994) {
+        addBuyStopCandidate(item.open, `${labelDate}关键阳线开盘价`, 10);
+      }
       addBuyStopCandidate(item.low * 0.995, `${labelDate}关键阳线最低价下方`, 12);
     }
   });
@@ -4142,7 +4566,7 @@ function ruleLibraryAdvice() {
   const riskReward = ruleRiskRewardLine(candle, supportPrice, resistancePrice, buyReferenceStop, levelRoleLabel(inferredLevelRole(resistance)));
   const riskRewardScore = riskReward?.ratio == null ? 0 : riskReward.ratio >= 3 ? 8 : -12;
   let stage = "盘整结构，等待区间边界确认";
-  if (longDowntrendRepair) {
+  if (longDowntrendContext && (recoveryAttempt || nearSupport || bigDrop)) {
     stage = "长期下跌后尝试趋势扭转";
   } else if (bigDrop && !upStructure) {
     stage = "急跌后修复观察";
@@ -4154,6 +4578,7 @@ function ruleLibraryAdvice() {
     stage = "上升趋势回调/延续观察";
   }
   const needsStabilityConfirmation = ["急跌", "下跌", "弱势", "大调整"].some((keyword) => stage.includes(keyword));
+  const weakReboundStage = ["下跌", "弱势"].some((keyword) => stage.includes(keyword));
 
   const candidates = [];
   const side = replayState.position ? "sell" : "buy";
@@ -4188,11 +4613,15 @@ function ruleLibraryAdvice() {
     }
   }
   if (nearSupport && bullish) {
-    const supportValidationReady = repairConfirmed && (shrinkVolume || currentSupportConfirm || riskReward?.ratio >= 3);
+    const supportValidationReady = repairConfirmed
+      && (pullbackReclaimConfirm || shrinkBullishRetestConfirm || closeBelowReclaimThenRetestConfirm);
     add("支撑验证买入模型", 62 + (currentSupportConfirm ? 12 : 0) + (shrinkVolume ? 6 : 0) + (repairConfirmed ? 6 : 0) + riskRewardScore, [
       supportPrice ? `接近支撑 ${formatPrice(supportPrice)}` : "接近支撑",
       "当前K线收阳",
       currentSupportConfirm ? "当前K线触及支撑后收阳拉起，可视为确认K线" : "",
+      pullbackReclaimConfirm ? "支撑附近出现跌破拉回阳线，完成回踩验证" : "",
+      shrinkBullishRetestConfirm ? "回踩过程缩量后出现支撑上方阳线，完成回踩验证" : "",
+      closeBelowReclaimThenRetestConfirm ? "有效跌破后首次拉回，后续再次在支撑上方收阳，完成二次回踩验证" : "",
       riskReward?.ratio >= 3 ? "上方压力空间满足3R要求" : "",
       repairConfirmed ? "已有回踩/平台/连续阳线确认" : "",
     ], [
@@ -4200,32 +4629,38 @@ function ruleLibraryAdvice() {
       repairConfirmed ? "" : "缺少结构修复确认",
       needsStabilityConfirmation && !repairConfirmed ? "当前结构偏弱，需要更多稳定确认" : "",
     ], [
-      supportValidationReady ? "当前K线已完成支撑踩稳确认；若止损空间在3%-8%且满足3R，可考虑买入。" : "等待支撑踩稳确认K线。",
+      supportValidationReady ? "当前K线已完成回踩验证；若止损空间在3%-8%且满足3R，可考虑买入。" : "等待跌破拉回或缩量后的支撑阳线确认。",
       "止损向前找结构依据：支撑、密集交易区上下沿、确认K线实体下沿或最低价。",
       riskReward?.text || "",
     ], "buy");
   }
-  if (supportPrice && (reclaimedSupport || (brokeSupport && candle.close > supportPrice && bullish))) {
+  if (supportPrice && (supportPiercedAndReclaimed || pullbackReclaimConfirm)) {
     const reclaimRetestConfirmed = supportRetestHeld || (smallPlatform && bullish);
+    const reclaimSpaceSatisfied = reclaimHasEnoughSpace || compositeReclaimConfirm;
+    const reclaimBuyConfirmed = reclaimRetestConfirmed && reclaimSpaceSatisfied && confirmationVolumeAccepted;
     const reclaimScore = 62
-      + (reclaimHasEnoughSpace ? 8 : -12)
+      + (reclaimSpaceSatisfied ? 8 : -12)
       + (reclaimRetestConfirmed ? 10 : 0)
-      + (shrinkVolume ? 4 : 0)
+      + (compositeReclaimConfirm ? 10 : 0)
+      + (confirmationVolumeAccepted ? 4 : 0)
       + Math.min(riskRewardScore, 6);
     add("跌破支撑后快速拉回模型", reclaimScore, [
       `跌破关键支撑 ${formatPrice(supportPrice)} 后快速收回`,
       "收盘重新回到支撑上方",
       reclaimHasEnoughSpace ? `拉回距离支撑约 ${formatPercent(reclaimSpacePct * 100)}，不是只贴在支撑上方` : "",
+      compositeReclaimConfirm ? "复合结构：此前已有跌破拉回背景，当前回踩中再次跌破支撑后立阳线收回" : "",
       reclaimRetestConfirmed ? "已有回踩不破或小平台确认" : "",
+      priorPullbackShrunk ? "跌破拉回及回踩过程中曾缩量" : "",
+      !shrinkVolume && confirmationVolumeAccepted ? `确认阳线允许放量，当前约为20日均量的 ${volumeRatio20.toFixed(2)} 倍` : "",
       riskReward?.ratio >= 3 ? "上方压力空间满足盈亏比要求" : "",
     ], [
-      reclaimHasEnoughSpace ? "" : "拉回只在支撑上方一点点，空间不够，不直接买入",
+      reclaimSpaceSatisfied ? "" : "拉回只在支撑上方一点点，空间不够，不直接买入",
       reclaimRetestConfirmed ? "" : "跌破拉回后大部分情况需要等待回踩确认，不能直接建议买入",
-      shrinkVolume ? "" : "缺少缩量企稳",
-      resistancePrice ? "" : "缺少上方压力，无法确认盈亏比",
+      confirmationVolumeAccepted ? "" : "跌破拉回及回踩过程中未见缩量，确认量能也不合格",
+      "",
       needsStabilityConfirmation && !reclaimRetestConfirmed ? "当前结构偏弱，不能只凭单根拉回买入" : "",
     ], [
-      reclaimRetestConfirmed && reclaimHasEnoughSpace ? "回踩确认后若继续站稳支撑上方，再考虑条件化买入。" : "先观察是否拉出空间，并等待再次回踩支撑不破。",
+      reclaimBuyConfirmed ? "跌破拉回、过程缩量和确认阳线均已成立，可按当前计划买入。" : "先观察是否拉出空间，并等待再次回踩支撑不破。",
       "止损向前找结构依据：支撑、密集交易区上下沿、回踩确认K线实体下沿或最低价。",
       resistancePrice && riskReward?.ratio !== null && riskReward.ratio < 3 ? "上方压力空间不足，暂不追。" : "",
       riskReward?.text || "",
@@ -4250,15 +4685,15 @@ function ruleLibraryAdvice() {
     ], "buy");
   }
   if (denseZonePullbackConfirm) {
-    add("交易密集区突破后回踩确认模型", 82 + (riskReward?.ratio >= 3 ? 6 : 0), [
+    add("交易密集区突破后回踩确认模型", 82 + (compositeReclaimConfirm ? 8 : 0) + (riskReward?.ratio >= 3 ? 6 : 0), [
       "突破交易密集区后回踩不破",
-      "回踩过程缩量",
-      "再次出现小阳线确认",
+      shrinkVolume ? "回踩过程缩量" : "",
+      compositeReclaimConfirm ? "回踩支撑过程中出现跌破拉回阳线，属于复合确认" : "再次出现小阳线确认",
       "小趋势保持向上",
       supportPrice ? `回踩支撑 ${formatPrice(supportPrice)}` : "",
     ], [
-      resistancePrice ? "" : "缺少上方压力评估",
-      riskReward?.ratio >= 3 ? "" : "盈亏比仍需确认",
+      "",
+      resistancePrice && riskReward?.ratio < 3 ? "盈亏比仍需确认" : "",
     ], [
       "若下一根K线继续站稳回踩支撑，可考虑买入。",
       "止损放在回踩平台下沿或小阳线实体下沿。",
@@ -4267,9 +4702,20 @@ function ruleLibraryAdvice() {
     ], "buy");
   }
   if (bigDrop && (twoUp || reclaimedSupport || breakout20 || currentSupportConfirm)) {
-    const repairEntryConfirmed = shortTrendUp && (twoUp || currentSupportConfirm || denseZonePullbackConfirm);
+    const acuteRepairDirectBuy = longDowntrendContext
+      && bullish
+      && riskReward?.ratio >= 3
+      && (twoUp || reclaimNextCandleConfirmed || priorReclaimNextCandleConfirmed || currentSupportConfirm || breakout20);
+    const repairEntryConfirmed = shortStructureUp
+      && (twoUp || currentSupportConfirm || denseZonePullbackConfirm)
+      && (!uptrendAcuteDrop || stableAfterAcuteDrop);
     const farResistanceSpace = resistancePrice ? (resistancePrice - candle.close) / candle.close >= 0.12 : false;
-    const repairSpeculationBuy = repairEntryConfirmed && Boolean(resistancePrice) && (farResistanceSpace || riskReward?.ratio >= 3);
+    const longDowntrendPanicBottomBuy = longDowntrendContext
+      && supportPiercedAndReclaimed
+      && riskReward?.ratio >= 3;
+    const repairSpeculationBuy = (repairEntryConfirmed || acuteRepairDirectBuy)
+      && (!longDowntrendContext || longDowntrendPanicBottomBuy)
+      && (!resistancePrice || farResistanceSpace || riskReward?.ratio >= 3);
     add("急跌后博弈修复模型", 74 + (twoUp ? 8 : 0) + (currentSupportConfirm ? 9 : 0) + (shortTrendUp ? 5 : 0) + (farResistanceSpace ? 6 : 0) + (riskReward?.ratio >= 3 ? 6 : 0), [
       "前期出现急跌",
       twoUp ? "连续阳线快速修复" : "出现修复信号",
@@ -4279,15 +4725,16 @@ function ruleLibraryAdvice() {
       riskReward?.ratio >= 3 ? "按当前止损测算满足3R" : "",
       supportPrice ? `支撑 ${formatPrice(supportPrice)}` : "参考关键K线/平台作为防守",
     ], [
-      repairSpeculationBuy ? "" : "需要站上5日线、出现连续阳线或支撑确认，并满足压力空间",
-      resistancePrice ? "" : "缺少上方压力线，无法确认盈亏比",
+      repairSpeculationBuy ? "" : "需要连续阳线、支撑确认或回踩结构转强，并满足压力空间",
+      uptrendAcuteDrop && !stableAfterAcuteDrop ? "上涨趋势出现急跌时先规避，等待缩量企稳、回踩不破或小平台确认后再考虑买点" : "",
+      "",
       twoUp || breakout20 || currentSupportConfirm ? "" : "缺少连续阳线、突破或支撑确认K线",
     ], [
-      repairSpeculationBuy ? "按急跌后修复试错处理；若止损空间在3%-8%且仍满足3R，可考虑买入。" : "等待下一根K线继续确认修复。",
+      repairSpeculationBuy ? "按急跌后修复试错处理；若止损空间在3%-8%且仍满足3R，可考虑买入。" : "上涨趋势急跌后先规避，等待缩量企稳、回踩不破或小平台后再评估。",
       supportPrice ? "止损向前寻找支撑或拉回关键K线下沿/最低价。" : "止损参考关键K线或小平台下沿。",
       resistancePrice
         ? (farResistanceSpace || riskReward?.ratio >= 3 ? riskReward?.text || `压力 ${formatPrice(resistancePrice)}，空间较远` : "上方压力空间不足，暂不追。")
-        : "先补充上方压力线，再计算3R空间。",
+        : "未画出上方压力，先按买入结构和止损空间判断，暂不计算固定盈亏比。",
     ], "buy");
   }
   const buyStopLoss = Number(replayState.position?.stopLoss) || 0;
@@ -4300,10 +4747,22 @@ function ruleLibraryAdvice() {
   const holdingHistory = entryIndex >= 0 ? history.slice(entryIndex) : [];
   const highestSinceEntry = holdingHistory.length ? Math.max(...holdingHistory.map((item) => item.high)) : candle.high;
   const positionMaxRiskMultiple = hasStopLossPlan ? (highestSinceEntry - entryForRisk) / plannedRisk : null;
+  const effectivePressurePrice = nearest.effectiveResistance?.price || null;
+  const upperEffectivePressurePrice = effectivePressurePrice && entryForRisk > 0 && effectivePressurePrice > entryForRisk
+    ? effectivePressurePrice
+    : null;
+  const touchedEffectivePressureSinceEntry = Boolean(
+    upperEffectivePressurePrice
+      && holdingHistory.some((item) => item.high >= upperEffectivePressurePrice * 0.995)
+  );
   const breaksStopLoss = hasStopLossPlan && candle.close < buyStopLoss;
   const breaksSupport = supportPrice ? candle.close < supportPrice * 0.995 : false;
   const strongWeakening = bigBear || (longUpper && candle.close < ma5) || (prev && prev.close < prev.open && candle.close < prev.close && candle.close < ma5);
-  const resistanceFailure = nearResistance && (longUpper || bigBear || candle.close < ma5);
+  const resistanceFailure = Boolean(upperEffectivePressurePrice && Math.abs(upperEffectivePressurePrice - candle.close) / candle.close <= 0.04)
+    && (longUpper || bigBear || candle.close < ma5);
+  const pressureFailureAfterTouch = touchedEffectivePressureSinceEntry
+    && candle.close < ma5
+    && candle.close < upperEffectivePressurePrice;
   const everReachedTakeProfitZone = !hasStopLossPlan || (positionMaxRiskMultiple != null && positionMaxRiskMultiple >= 3);
 
   if (replayState.position && hasStopLossPlan && !breaksStopLoss && !everReachedTakeProfitZone) {
@@ -4311,37 +4770,56 @@ function ruleLibraryAdvice() {
       `已设置止损 ${formatPrice(buyStopLoss)}`,
       positionRiskMultiple == null ? "" : `当前约 ${positionRiskMultiple.toFixed(2)}R`,
       positionMaxRiskMultiple == null ? "" : `最高曾到 ${positionMaxRiskMultiple.toFixed(2)}R`,
-      "规则要求先等待止损触发，或曾经盈利超过3R后再考虑止盈",
+      "规则要求先等待止损触发，或曾经盈利达到3R以上后再考虑止盈",
     ], [
-      "盈利尚未曾达到3R，不进入止盈判断",
+      "盈利尚未曾达到3R以上，不进入止盈判断",
       "未触发止损，暂不因普通波动卖出",
     ], [
       "继续持有，优先等待止损触发。",
-      "当盈利曾经达到3R后，再结合趋势转弱、压力位、上引线、阴线或跌破5日线考虑止盈。",
+      "当盈利曾经达到3R以上后，再结合趋势转弱、压力位、上引线、阴线或跌破5日线考虑止盈。",
       `止损触发价：${formatPrice(buyStopLoss)}`,
     ], "sell");
   }
 
-  const canEvaluateSell = !hasStopLossPlan || breaksStopLoss || everReachedTakeProfitZone;
-  if (replayState.position && canEvaluateSell && (nearResistance || longUpper || bigBear || candle.close < ma5 || breaksStopLoss || (!hasStopLossPlan && breaksSupport))) {
-    const trendWeakAfter3R = everReachedTakeProfitZone && (strongWeakening || resistanceFailure || candle.close < ma5);
-    const immediateSell = breaksStopLoss || (!hasStopLossPlan && (breaksSupport || strongWeakening || resistanceFailure)) || trendWeakAfter3R;
+  const pressureFailureSell = pressureFailureAfterTouch && candle.close < ma5;
+  const canEvaluateSell = !hasStopLossPlan || breaksStopLoss || everReachedTakeProfitZone || pressureFailureSell;
+  if (replayState.position && canEvaluateSell && (touchedEffectivePressureSinceEntry || longUpper || bigBear || candle.close < ma5 || breaksStopLoss || (!hasStopLossPlan && breaksSupport))) {
+    const trendWeakAfter3R = everReachedTakeProfitZone && (strongWeakening || resistanceFailure || pressureFailureAfterTouch || candle.close < ma5);
+    const immediateSell = breaksStopLoss || pressureFailureSell || (!hasStopLossPlan && (breaksSupport || strongWeakening || resistanceFailure || pressureFailureAfterTouch)) || trendWeakAfter3R;
     add("卖出/止盈风险模型", immediateSell ? 86 : 68, [
       breaksStopLoss ? `跌破止损位 ${formatPrice(buyStopLoss)}` : "",
       hasStopLossPlan && positionRiskMultiple != null ? `当前约 ${positionRiskMultiple.toFixed(2)}R` : "",
       hasStopLossPlan && positionMaxRiskMultiple != null ? `最高曾到 ${positionMaxRiskMultiple.toFixed(2)}R` : "",
       everReachedTakeProfitZone && !breaksStopLoss ? "盈亏比曾经达到3R以上" : "",
       nearResistance && resistancePrice ? `价格接近压力 ${formatPrice(resistancePrice)}` : "",
+      touchedEffectivePressureSinceEntry && upperEffectivePressurePrice ? `持仓期间已打到上方有效压力 ${formatPrice(upperEffectivePressurePrice)}` : "",
+      pressureFailureAfterTouch ? "打到压力后未能继续突破，并跌破5日线" : "",
+      pressureFailureSell ? "压力失败后趋势走坏，跌破5日线" : "",
       candle.close < ma5 ? "跌破5日线" : "",
       longUpper || bigBear ? "出现上引线或阴线转弱" : "",
       !hasStopLossPlan && breaksSupport ? "跌破关键支撑" : "",
     ], [
       immediateSell ? "" : "目前更像止盈预警，需要确认趋势是否继续转弱",
     ], [
-      breaksStopLoss ? "止损已触发，按计划卖出。" : "盈亏比曾经到过3R以上，现在可以根据趋势转弱考虑止盈。",
+      breaksStopLoss ? "止损已触发，按计划卖出。" : pressureFailureSell ? "价格曾触及或突破压力但未能站稳，当前跌破5日线，执行卖出。" : "盈亏比曾经达到3R以上，现在可以根据趋势转弱考虑止盈。",
+      pressureFailureAfterTouch ? "已触压但上不去，跌破5日线按移动止盈执行。" : "",
       immediateSell && !breaksStopLoss ? "若下一根继续转弱，可执行止盈或减仓。" : "先作为止盈预警，观察是否继续转弱。",
-      nearResistance && resistancePrice ? `接近压力：${formatPrice(resistancePrice)}` : "",
+      upperEffectivePressurePrice && Math.abs(upperEffectivePressurePrice - candle.close) / candle.close <= 0.04 ? `接近上方有效压力：${formatPrice(upperEffectivePressurePrice)}` : "",
     ], "sell");
+  }
+  if (continuationStructureConfirmed) {
+    add("上升趋势延续：跌破拉回后缩量回踩确认", 86 + (riskReward?.ratio >= 3 ? 8 : 0), [
+      "上升趋势仍保持",
+      "先跌破支撑后收回",
+      "后续回踩支撑不破",
+      shrinkVolume ? "回踩过程缩量" : "确认日量能未明显放大",
+      riskReward?.ratio >= 3 ? "止损与有效压力满足3R" : "",
+    ], [
+      riskReward?.ratio >= 3 ? "" : "盈亏比仍需确认",
+    ], [
+      "该结构已完成两次验证，可按趋势延续买点处理。",
+      "止损放在支撑区下沿或跌破拉回低点下方。",
+    ], "buy");
   }
 
   const sideCandidates = candidates.filter((candidate) => candidate.side === side);
@@ -4373,20 +4851,109 @@ function ruleLibraryAdvice() {
   }
   sideCandidates.sort((a, b) => b.score - a.score);
   const best = sideCandidates[0];
-  const belowMa5ForBuy = side === "buy" && candle.close < ma5;
-  if (belowMa5ForBuy) {
-    if (!best.missing.includes("收盘价仍低于5日线，规则库不允许建议买入")) {
-      best.missing = ["收盘价仍低于5日线，规则库不允许建议买入", ...best.missing];
-    }
-    best.plan = ["先等待收盘重新站上5日线，再重新评估买点。", ...best.plan];
+  const weeklyDowntrendBuyAllowed = Boolean(
+    (best.model.includes("急跌后") && (reclaimNextCandleConfirmed || priorReclaimNextCandleConfirmed) && bullish)
+      || (best.model.includes("跌破支撑后快速拉回") && longDowntrendSecondConfirm && supportPiercedAndReclaimed && bullish)
+      || closeBelowReclaimThenRetestConfirm
+      || (denseZonePullbackConfirm && breakout20)
+  );
+  if (side === "buy" && bearishConfirmationFailure) {
+    const text = "确认日出现明显阴线且收盘接近最低价，缩量不能替代转强确认";
+    if (!best.missing.includes(text)) best.missing = [text, ...best.missing];
+    best.plan = ["当前回踩K线明显转弱，只观察支撑是否继续有效；等待阳线收回、再次回踩不破或平台突破后再评估。", ...best.plan];
     best.score = Math.min(best.score, 67);
   }
-  const shortTrendNotUpForBuy = side === "buy" && !shortTrendUp;
+  if (side === "buy" && !bullish) {
+    const text = "买入确认K线必须收阳，当前K线未形成阳线确认";
+    if (!best.missing.includes(text)) best.missing = [text, ...best.missing];
+    best.plan = ["等待当前或下一交易日形成收盘高于开盘的阳线，再重新评估买入。", ...best.plan];
+    best.score = Math.min(best.score, 67);
+  }
+  const fakeBullishRetest = side === "buy"
+    && bullish
+    && prev
+    && candle.close <= prev.close
+    && currentSupportRetestHeld;
+  if (fakeBullishRetest) {
+    const text = "支撑附近虽收盘略高于开盘，但收盘未高于前一根K线，属于假阳线，不构成向上确认";
+    if (!best.missing.includes(text)) best.missing = [text, ...best.missing];
+    best.plan = ["当前阳线力度不足，等待收盘高于前一根K线并形成向上结构后再评估。", ...best.plan];
+    best.score = Math.min(best.score, 67);
+  }
+  if (side === "buy" && closeBelowThenReclaimed && !reclaimNextCandleConfirmed) {
+    const text = "跌破拉回当天只作为候选，必须等待下一根K线收阳且收盘高于前一根，形成向上结构后再买入";
+    if (!best.missing.includes(text)) best.missing = [text, ...best.missing];
+    best.plan = ["当前是跌破拉回当天，等待下一根K线收阳、收盘高于当前K线后再确认买入。", ...best.plan];
+    best.score = Math.min(best.score, 67);
+  }
+  if (side === "buy" && closeBelowThenReclaimed) {
+    const text = "前一根K线收盘仍在支撑下方，次日拉回只视为重新夺回支撑，需要重新评估新的向上结构";
+    if (!best.missing.includes(text)) best.missing = [text, ...best.missing];
+    best.plan = ["前一根K线已经收盘跌破支撑，当前拉回不能直接视为确认；重新观察后续阳线、回踩不破或小平台结构。", ...best.plan];
+    best.score = Math.min(best.score, 67);
+  }
+  if (side === "buy" && weeklyDowntrend && !weeklyDowntrendBuyAllowed) {
+    const text = "周线仍处于下跌趋势，普通趋势延续结构不能直接建议买入";
+    if (!best.missing.includes(text)) best.missing = [text, ...best.missing];
+    best.plan = ["周线下跌只做急跌后的结构性反弹，或等待筑底完成并突破/回踩确认；当前继续观望。", ...best.plan];
+    best.score = Math.min(best.score, 67);
+  }
+  const belowMa5ForBuy = side === "buy" && !aboveMa5;
+  if (belowMa5ForBuy) {
+    const ma5GapPct = ma5 > 0 ? ((ma5 - candle.close) / ma5) * 100 : 0;
+    best.plan = [`收盘低于5日线约 ${formatPercent(ma5GapPct)}，作为扣分项处理，不单独否决已确认的买入结构。`, ...best.plan];
+    best.score = Math.max(0, best.score - 8);
+  }
+  const shortTrendNotUpForBuy = side === "buy" && !shortStructureUp && !continuationStructureConfirmed;
   if (shortTrendNotUpForBuy) {
     if (!best.missing.includes("小趋势尚未向上，暂不建议买入")) {
       best.missing = ["小趋势尚未向上，暂不建议买入", ...best.missing];
     }
     best.plan = ["先等待收盘站上5日线，或出现连续阳线/跌破拉回确认后再评估买点。", ...best.plan];
+    best.score = Math.min(best.score, 67);
+  }
+  if (side === "buy" && uptrendAcuteDrop && !stableAfterAcuteDrop && !continuationStructureConfirmed) {
+    const text = "上涨趋势出现急跌，先规避；等待缩量企稳、回踩不破或小平台确认后再考虑买点";
+    if (!best.missing.includes(text)) best.missing = [text, ...best.missing];
+    best.plan = ["当前属于上涨趋势急跌后的初步修复，不直接追买；先等企稳结构成立后再重新计算止损和盈亏比。", ...best.plan];
+    best.score = Math.min(best.score, 67);
+  }
+  if (side === "buy" && priorUpThenFastDrop && validationCountAfterUpDrop < 2 && !multiBottomConfirm) {
+    const text = "上涨后一波后的快速/深度下跌，当前属于第一次反弹，至少需要两次结构验证后再买入";
+    if (!best.missing.includes(text)) best.missing = [text, ...best.missing];
+    best.plan = ["第一次反弹只观察，等待后续回踩不破、缩量平台或再次支撑确认后再评估买点。", ...best.plan];
+    best.score = Math.min(best.score, 67);
+  }
+  const acuteRepairBottomAllowed = best.model.includes("急跌后")
+    && (supportPiercedAndReclaimed || priorBreachThenReclaim)
+    && bullish
+    && riskReward?.ratio >= 3;
+  if (side === "buy" && longDowntrendContext && !longDowntrendSecondConfirm && !acuteRepairBottomAllowed) {
+    const text = "\u957f\u671f\u4e0b\u8dcc\u8d8b\u52bf\u4e0d\u5c5e\u4e8e\u77ed\u671f\u6025\u8dcc\u4fee\u590d\u6a21\u578b\uff1b\u7b2c\u4e00\u6b21\u5e95\u90e8\u62c9\u56de\u4e0d\u76f4\u63a5\u4e70\u5165";
+    if (!best.missing.includes(text)) best.missing = [text, ...best.missing];
+    best.plan = ["\u957f\u671f\u4e0b\u8dcc\u540e\u5148\u770b\u8d8b\u52bf\u662f\u5426\u8d70\u5e73\uff0c\u518d\u7b49\u4e8c\u6b21\u6216\u591a\u6b21\u5e95\u90e8\u786e\u8ba4\u3001\u652f\u6491\u8dcc\u7834\u62c9\u56de\u6216\u5c0f\u5e73\u53f0\u786e\u8ba4\u540e\u91cd\u65b0\u8bc4\u4f30\u4e70\u70b9\u3002", ...best.plan];
+    best.score = Math.min(best.score, 67);
+  }
+  if (side === "buy" && weakReboundStage && !supportPiercedAndReclaimed) {
+    const text = "下跌趋势反弹必须先打穿关键支撑后快速拉回，不能只因靠近支撑或缩量小阳买入";
+    if (!best.missing.includes(text)) best.missing = [text, ...best.missing];
+    best.plan = ["下跌趋势只做支撑跌破后的拉回反弹；等待打穿支撑后快速收回、再站稳支撑上方。", ...best.plan];
+    best.score = Math.min(best.score, 67);
+  }
+  if (side === "buy" && supportVolumeTooHigh) {
+    const text = `支撑附近成交量放大到近20日均量约 ${volumeRatio20.toFixed(2)} 倍，抛压未释放完，不直接买入`;
+    if (!best.missing.includes(text)) best.missing = [text, ...best.missing];
+    best.plan = ["支撑附近放量过大时先观望，等待后续缩量企稳、回踩不破或再次小阳线确认后再评估。", ...best.plan];
+    best.score = Math.min(best.score, 67);
+  }
+  if (side === "buy" && breaksUpperPressureWithoutRetest) {
+    const text = `连续大涨突破上方压力/突破位 ${formatPrice(supportPrice)}，尚未完成突破后的回踩验证，不直接买入`;
+    if (!best.missing.includes(text)) best.missing = [text, ...best.missing];
+    best.plan = [
+      "连续大涨突破压力后先观望，等待回踩突破位不破、缩量企稳或形成新平台后，再重新评估买入。",
+      "回踩验证成立前，不把突破当日的强阳线直接作为买入确认。",
+      ...best.plan,
+    ];
     best.score = Math.min(best.score, 67);
   }
   if (side === "buy" && tooFarFromSupport) {
@@ -4408,11 +4975,7 @@ function ruleLibraryAdvice() {
     best.score = Math.min(best.score, 67);
   }
   if (side === "buy" && !resistancePrice) {
-    if (!best.missing.includes("缺少上方压力线，不能默认压力很远")) {
-      best.missing = ["缺少上方压力线，不能默认压力很远", ...best.missing];
-    }
-    best.plan = ["先补充上方压力线并确认至少约3R空间，再决定是否买入。", ...best.plan];
-    best.score = Math.min(best.score, 67);
+    best.plan = ["未画出上方压力时，不用盈亏比拦截买点；只按买入结构、5日线、支撑确认和3%-8%止损空间判断。", ...best.plan];
   }
   let action = "watch";
   let actionText = "建议观望";
@@ -4439,10 +5002,806 @@ function ruleLibraryAdvice() {
       }
     }
   }
-  return { side, sideLabel, action, actionText, stage, pressurePlan, ...best };
+  return {
+    side,
+    sideLabel,
+    action,
+    actionText,
+    stage,
+    pressurePlan,
+    stopLoss: buyReferenceStop,
+    stopBasis: buyStopBasis,
+    stopRiskPct: buyRiskPct == null ? null : buyRiskPct * 100,
+    ...best,
+  };
+}
+
+function recognizeMarketStructure(history = []) {
+  const STATUS_LABELS = {
+    candidate: "候选",
+    testing: "验证中",
+    validated: "已验证",
+    broken: "已失效",
+    reclaimed: "跌破后收回",
+    pending_retest: "突破后待回踩确认",
+    expired: "已过期",
+    none: "无",
+  };
+  const STAGE_LABELS = [
+    "超跌反弹",
+    "趋势修复",
+    "震荡筑底",
+    "突破确认",
+    "回踩确认",
+    "盘整区间",
+    "上涨延续",
+    "下跌延续",
+    "K线不足",
+  ];
+  const bars = (Array.isArray(history) ? history : []).filter((bar) => {
+    return bar && Number(bar.close) > 0 && Number(bar.high) > 0 && Number(bar.low) > 0;
+  });
+  const asOfDate = bars.at(-1)?.date || "";
+  const blankValidation = (kind) => ({
+    status: "none",
+    label: kind === "support" ? "无支撑候选" : "无压力候选",
+    price: null,
+    zoneLow: null,
+    zoneHigh: null,
+    basis: "可用K线不足，未做结构判断。",
+    confirmedTouches: 0,
+    source: "",
+    asOfDate,
+    participatesInScoring: false,
+  });
+  if (bars.length < 20) {
+    return {
+      trendDirection: "",
+      trendStage: "K线不足",
+      trendConfidence: 0,
+      supportCandidates: [],
+      resistanceCandidates: [],
+      supportValidation: blankValidation("support"),
+      resistanceValidation: blankValidation("resistance"),
+      asOfDate,
+      lookbackBars: bars.length,
+      participatesInScoring: false,
+      allowedStages: STAGE_LABELS,
+    };
+  }
+
+  function roundPrice(value) {
+    return Number(Number(value).toFixed(4));
+  }
+
+  function mean(items, selector) {
+    return average(items, selector);
+  }
+
+  function confirmedSwings(series, windowSize) {
+    const points = [];
+    if (series.length < windowSize * 2 + 1) return points;
+    for (let index = windowSize; index < series.length - windowSize; index += 1) {
+      const slice = series.slice(index - windowSize, index + windowSize + 1);
+      const bar = series[index];
+      const high = Math.max(...slice.map((item) => Number(item.high)));
+      const low = Math.min(...slice.map((item) => Number(item.low)));
+      if (Number(bar.high) >= high) {
+        points.push({
+          price: Number(bar.high),
+          date: bar.date || "",
+          index,
+          confirmedIndex: Math.min(series.length - 1, index + windowSize),
+          kind: "swing_high",
+        });
+      }
+      if (Number(bar.low) <= low) {
+        points.push({
+          price: Number(bar.low),
+          date: bar.date || "",
+          index,
+          confirmedIndex: Math.min(series.length - 1, index + windowSize),
+          kind: "swing_low",
+        });
+      }
+    }
+    return points;
+  }
+
+  function clusterPoints(points, mergePct) {
+    const sorted = points.filter((point) => point.price > 0).sort((a, b) => a.price - b.price || a.index - b.index);
+    const clusters = [];
+    sorted.forEach((point) => {
+      const last = clusters.at(-1);
+      if (last && Math.abs(point.price - last.price) / last.price <= mergePct) {
+        last.points.push(point);
+        last.price = mean(last.points, (item) => item.price);
+      } else {
+        clusters.push({ price: point.price, points: [point] });
+      }
+    });
+    return clusters;
+  }
+
+  function reactionAfter(index, side) {
+    const windowBars = bars.slice(index + 1, index + 4);
+    if (!windowBars.length) return null;
+    const close = Number(bars[index].close);
+    if (!(close > 0)) return null;
+    if (side === "support") {
+      const high = Math.max(...windowBars.map((item) => Number(item.high)));
+      return (high - close) / close;
+    }
+    const low = Math.min(...windowBars.map((item) => Number(item.low)));
+    return (close - low) / close;
+  }
+
+  function volumeNote(index, side) {
+    const sample = bars.slice(Math.max(0, index - 20), index);
+    if (sample.length < 5) return "";
+    const base = mean(sample, (item) => Number(item.volume) || 0);
+    const volume = Number(bars[index].volume) || 0;
+    if (!(base > 0) || !(volume > 0)) return "";
+    const ratio = volume / base;
+    if (side === "support" && ratio <= 0.85) return "回踩缩量";
+    if (side === "support" && ratio >= 1.8) return "触碰放量";
+    if (side === "resistance" && ratio >= 1.8) return "触压放量";
+    return "";
+  }
+
+  function maybeExpire(status, lastTouchIndex, price, close) {
+    if (!["candidate", "testing", "validated"].includes(status)) return status;
+    if (lastTouchIndex < 0) return status;
+    const barsSince = bars.length - 1 - lastTouchIndex;
+    const distance = Math.abs(close - price) / price;
+    if (barsSince > 90 && distance > 0.12) return "expired";
+    return status;
+  }
+
+  function evaluateSwingSupport(cluster) {
+    const price = cluster.price;
+    const firstPoint = cluster.points.slice().sort((a, b) => a.index - b.index)[0];
+    const start = firstPoint?.confirmedIndex || 0;
+    let status = "candidate";
+    let touches = 0;
+    let active = false;
+    let lastTouchIndex = -1;
+    let lastTouchDate = "";
+    let reactions = [];
+    let volumeNotes = [];
+    for (let index = start; index < bars.length; index += 1) {
+      const bar = bars[index];
+      const close = Number(bar.close);
+      const low = Number(bar.low);
+      const open = Number(bar.open);
+      const broke = close < price * 0.99;
+      const tagged = low <= price * 1.015 && low >= price * 0.96;
+      const held = close >= price * 0.995;
+      if (broke) {
+        status = "broken";
+        touches = 0;
+        active = false;
+        continue;
+      }
+      if (status === "broken" && close >= price) {
+        status = "reclaimed";
+        active = false;
+        continue;
+      }
+      if (status === "broken" || !tagged || !held) {
+        if (!tagged || close > price * 1.03) active = false;
+        continue;
+      }
+      if (active) continue;
+      active = true;
+      touches += 1;
+      lastTouchIndex = index;
+      lastTouchDate = bar.date || "";
+      const reaction = reactionAfter(index, "support");
+      if (reaction != null) reactions.push(reaction);
+      const note = volumeNote(index, "support");
+      if (note) volumeNotes.push(note);
+      const confirming = close >= open && close >= price * 0.995;
+      if (status === "reclaimed") {
+        status = touches >= 2 && confirming ? "validated" : "testing";
+      } else if (touches >= 2 && confirming) {
+        status = "validated";
+      } else if (status !== "validated") {
+        status = "testing";
+      }
+    }
+    const close = Number(bars.at(-1).close);
+    status = maybeExpire(status, lastTouchIndex, price, close);
+    const basisByStatus = {
+      candidate: "摆动低点形成的支撑候选，单次下探不会升级为已验证。",
+      testing: "价格已触碰该支撑，仍需另一次守住，不能因一次反弹视为已验证。",
+      validated: "至少两次独立回踩守住，且确认K线收在支撑上方。",
+      broken: "收盘跌破该支撑，原候选失效。",
+      reclaimed: "跌破后已经收回，但还没有完成回踩确认，不能直接视为已验证。",
+      expired: "该支撑距离当前价格较远，且长时间没有再次被验证。",
+    };
+    return {
+      price: roundPrice(price),
+      zoneLow: roundPrice(price * 0.985),
+      zoneHigh: roundPrice(price * 1.015),
+      type: "support",
+      status,
+      statusLabel: STATUS_LABELS[status] || status,
+      source: "swing_low",
+      touches,
+      reactionPct: reactions.length ? reactions.reduce((sum, item) => sum + item, 0) / reactions.length : null,
+      volumeNote: volumeNotes.at(-1) || "",
+      basis: basisByStatus[status] || "",
+      firstDate: bars[start]?.date || firstPoint?.date || "",
+      lastTouchDate,
+      lastTouchIndex,
+    };
+  }
+
+  function evaluateSwingResistance(cluster) {
+    const price = cluster.price;
+    const firstPoint = cluster.points.slice().sort((a, b) => a.index - b.index)[0];
+    const start = firstPoint?.confirmedIndex || 0;
+    let status = "candidate";
+    let touches = 0;
+    let active = false;
+    let lastTouchIndex = -1;
+    let lastTouchDate = "";
+    let breakoutIndex = -1;
+    let reactions = [];
+    let volumeNotes = [];
+    for (let index = start; index < bars.length; index += 1) {
+      const bar = bars[index];
+      const close = Number(bar.close);
+      const high = Number(bar.high);
+      const open = Number(bar.open);
+      if (status !== "broken" && close > price * 1.01) {
+        status = "broken";
+        breakoutIndex = index;
+        active = false;
+        continue;
+      }
+      if (status === "broken") continue;
+      const tagged = high >= price * 0.985 && high <= price * 1.04;
+      const rejected = close <= price * 1.005;
+      if (!tagged || !rejected) {
+        if (!tagged || close < price * 0.97) active = false;
+        continue;
+      }
+      if (active) continue;
+      active = true;
+      touches += 1;
+      lastTouchIndex = index;
+      lastTouchDate = bar.date || "";
+      const reaction = reactionAfter(index, "resistance");
+      if (reaction != null) reactions.push(reaction);
+      const note = volumeNote(index, "resistance");
+      if (note) volumeNotes.push(note);
+      const confirming = close <= open && close <= price * 1.005;
+      if (touches >= 2 && confirming) status = "validated";
+      else if (status !== "validated") status = "testing";
+    }
+    const close = Number(bars.at(-1).close);
+    if (status !== "broken") status = maybeExpire(status, lastTouchIndex, price, close);
+    const basisByStatus = {
+      candidate: "摆动高点形成的压力候选。",
+      testing: "价格已触碰该压力，仍需更多拒绝确认。",
+      validated: "至少两次独立触碰后收盘回落，记为已验证压力。",
+      broken: "收盘已突破该压力。突破本身不会把它变成已验证支撑。",
+      expired: "该压力距离当前价格较远，或已经过旧。",
+    };
+    return {
+      price: roundPrice(price),
+      zoneLow: roundPrice(price * 0.985),
+      zoneHigh: roundPrice(price * 1.015),
+      type: "resistance",
+      status,
+      statusLabel: STATUS_LABELS[status] || status,
+      source: "swing_high",
+      touches,
+      reactionPct: reactions.length ? reactions.reduce((sum, item) => sum + item, 0) / reactions.length : null,
+      volumeNote: volumeNotes.at(-1) || "",
+      basis: basisByStatus[status] || "",
+      firstDate: bars[start]?.date || firstPoint?.date || "",
+      lastTouchDate,
+      lastTouchIndex,
+      breakoutIndex,
+    };
+  }
+
+  function evaluatePressureBreakoutSupport(price, breakoutIndex) {
+    let holds = 0;
+    let active = false;
+    let lastTouchIndex = -1;
+    let lastTouchDate = "";
+    let reactions = [];
+    let status = "pending_retest";
+    for (let index = breakoutIndex + 1; index < bars.length; index += 1) {
+      const bar = bars[index];
+      const close = Number(bar.close);
+      const low = Number(bar.low);
+      const open = Number(bar.open);
+      if (close < price * 0.99) {
+        status = "broken";
+        holds = 0;
+        active = false;
+        continue;
+      }
+      if (status === "broken" && close >= price) {
+        status = "reclaimed";
+        active = false;
+        continue;
+      }
+      const tagged = low <= price * 1.02 && low >= price * 0.97;
+      const held = close >= price * 0.995;
+      if (!tagged || !held || status === "broken") {
+        if (!tagged) active = false;
+        continue;
+      }
+      if (active) continue;
+      active = true;
+      holds += 1;
+      lastTouchIndex = index;
+      lastTouchDate = bar.date || "";
+      const reaction = reactionAfter(index, "support");
+      if (reaction != null) reactions.push(reaction);
+      const confirming = close >= open;
+      if (status === "reclaimed") {
+        status = holds >= 2 && confirming ? "validated" : "testing";
+      } else if (holds >= 2 && confirming) {
+        status = "validated";
+      } else if (status !== "validated") {
+        status = "testing";
+      }
+    }
+    const basisByStatus = {
+      pending_retest: "收盘突破压力后只记为待回踩确认，突破当日不视为已验证支撑。",
+      testing: "压力突破后的回踩还没有两次收阳守住，仍在验证中，不能升级为已验证支撑。",
+      validated: "压力突破后至少两次回踩守住，才记为已验证支撑。",
+      broken: "突破后的回踩没有守住，该支撑候选失效。",
+      reclaimed: "跌破后收回，仍需后续回踩确认，不能直接视为已验证支撑。",
+    };
+    return {
+      price: roundPrice(price),
+      zoneLow: roundPrice(price * 0.985),
+      zoneHigh: roundPrice(price * 1.015),
+      type: "support",
+      status,
+      statusLabel: STATUS_LABELS[status] || status,
+      source: "pressure_breakout",
+      touches: holds,
+      reactionPct: reactions.length ? reactions.reduce((sum, item) => sum + item, 0) / reactions.length : null,
+      volumeNote: "",
+      basis: basisByStatus[status] || "",
+      firstDate: bars[breakoutIndex]?.date || "",
+      lastTouchDate,
+      lastTouchIndex,
+      breakoutIndex,
+    };
+  }
+
+  const swingWindow = 3;
+  const swings = confirmedSwings(bars, swingWindow);
+  function fallbackPoint(kind) {
+    const recent = bars.slice(0, -swingWindow).slice(-40);
+    if (!recent.length) return null;
+    let best = recent[0];
+    recent.forEach((bar) => {
+      if (kind === "swing_low" && Number(bar.low) <= Number(best.low)) best = bar;
+      if (kind === "swing_high" && Number(bar.high) >= Number(best.high)) best = bar;
+    });
+    const index = bars.indexOf(best);
+    if (index < 0) return null;
+    return {
+      price: kind === "swing_low" ? Number(best.low) : Number(best.high),
+      date: best.date || "",
+      index,
+      confirmedIndex: Math.min(bars.length - 1, index + swingWindow),
+      kind,
+    };
+  }
+  const lowSwings = swings.filter((point) => point.kind === "swing_low");
+  const highSwings = swings.filter((point) => point.kind === "swing_high");
+  const fallbackLow = fallbackPoint("swing_low");
+  const fallbackHigh = fallbackPoint("swing_high");
+  if (fallbackLow && !lowSwings.some((point) => Math.abs(point.price - fallbackLow.price) / fallbackLow.price <= 0.015)) {
+    lowSwings.push(fallbackLow);
+  }
+  if (fallbackHigh && !highSwings.some((point) => Math.abs(point.price - fallbackHigh.price) / fallbackHigh.price <= 0.015)) {
+    highSwings.push(fallbackHigh);
+  }
+  const lowClusters = clusterPoints(lowSwings, 0.015);
+  const highClusters = clusterPoints(highSwings, 0.015);
+  const close = Number(bars.at(-1).close);
+  let supportCandidates = lowClusters.map(evaluateSwingSupport);
+  const resistanceEvaluations = highClusters.map(evaluateSwingResistance);
+  const breakoutSupports = [];
+  resistanceEvaluations.forEach((level) => {
+    if (level.breakoutIndex >= 0) {
+      breakoutSupports.push(evaluatePressureBreakoutSupport(level.price, level.breakoutIndex));
+    }
+  });
+  supportCandidates = supportCandidates.filter((level) => {
+    return !breakoutSupports.some((broken) => Math.abs(broken.price - level.price) / level.price <= 0.012);
+  }).concat(breakoutSupports);
+
+  function withScore(level) {
+    const distance = Math.abs(level.price - close) / close;
+    const statusScore = {
+      validated: 8,
+      testing: 5,
+      pending_retest: 4,
+      reclaimed: 4,
+      candidate: 2,
+      broken: 1,
+      expired: 0,
+    }[level.status] || 0;
+    const reactionBoost = level.reactionPct > 0 ? Math.min(level.reactionPct, 0.08) * 20 : 0;
+    return {
+      ...level,
+      score: Number((statusScore + level.touches * 1.5 + Math.max(0, 4 - distance * 25) + reactionBoost).toFixed(2)),
+    };
+  }
+
+  supportCandidates = supportCandidates
+    .map(withScore)
+    .filter((level) => level.price <= close * 1.03 && level.price >= close * 0.6 && level.status !== "expired")
+    .sort((a, b) => Math.abs(a.price - close) - Math.abs(b.price - close) || b.score - a.score || a.price - b.price)
+    .slice(0, 4)
+    .map((level) => {
+      const copy = { ...level };
+      delete copy.lastTouchIndex;
+      delete copy.breakoutIndex;
+      return copy;
+    });
+  const resistanceCandidates = resistanceEvaluations
+    .filter((level) => level.status !== "broken")
+    .map(withScore)
+    .filter((level) => level.price >= close * 0.995 && level.price <= close * 1.35 && level.status !== "expired")
+    .sort((a, b) => Math.abs(a.price - close) - Math.abs(b.price - close) || b.score - a.score || a.price - b.price)
+    .slice(0, 4)
+    .map((level) => {
+      const copy = { ...level };
+      delete copy.lastTouchIndex;
+      delete copy.breakoutIndex;
+      return copy;
+    });
+
+  function validationFrom(candidates, kind) {
+    const selected = candidates[0] || null;
+    if (!selected) {
+      return {
+        status: "none",
+        label: kind === "support" ? "无支撑候选" : "无压力候选",
+        price: null,
+        zoneLow: null,
+        zoneHigh: null,
+        basis: kind === "support" ? "当前可见K线里没有可用的支撑候选。" : "当前可见K线里没有仍有效的压力候选。",
+        confirmedTouches: 0,
+        source: "",
+        asOfDate,
+        participatesInScoring: false,
+      };
+    }
+    return {
+      status: selected.status,
+      label: selected.statusLabel,
+      price: selected.price,
+      zoneLow: selected.zoneLow,
+      zoneHigh: selected.zoneHigh,
+      basis: selected.basis,
+      confirmedTouches: selected.touches,
+      source: selected.source,
+      asOfDate,
+      participatesInScoring: false,
+    };
+  }
+
+  const supportValidation = validationFrom(supportCandidates, "support");
+  const resistanceValidation = validationFrom(resistanceCandidates, "resistance");
+
+  const maOf = (count) => mean(bars.slice(-count), (item) => Number(item.close));
+  const ma20 = maOf(Math.min(20, bars.length));
+  const ma60 = maOf(Math.min(60, bars.length));
+  const ma20Prev = bars.length >= 30 ? mean(bars.slice(-30, -10), (item) => Number(item.close)) : ma20;
+  const ma20Slope = ma20Prev > 0 ? (ma20 - ma20Prev) / ma20Prev : 0;
+  const weekly = dailyToWeeklyCandles(bars);
+  const weeklyClose = Number(weekly.at(-1)?.close || close);
+  const weeklyMa10 = weekly.length >= 10 ? mean(weekly.slice(-10), (item) => Number(item.close)) : weeklyClose;
+  const weeklyMa30 = weekly.length >= 30 ? mean(weekly.slice(-30), (item) => Number(item.close)) : weeklyMa10;
+  const recentSwings = swings.filter((point) => point.index >= bars.length - 160);
+  const swingLows = recentSwings.filter((point) => point.kind === "swing_low");
+  const swingHighs = recentSwings.filter((point) => point.kind === "swing_high");
+  const higherLows = swingLows.length >= 2 && swingLows.at(-1).price > swingLows.at(-2).price * 1.01;
+  const lowerHighs = swingHighs.length >= 2 && swingHighs.at(-1).price < swingHighs.at(-2).price * 0.99;
+  let upScore = 0;
+  let downScore = 0;
+  if (close > ma20) upScore += 1;
+  if (close < ma20) downScore += 1;
+  if (ma20 > ma60 * 1.005) upScore += 1;
+  if (ma20 < ma60 * 0.995) downScore += 1;
+  if (ma20Slope > 0.008) upScore += 1;
+  if (ma20Slope < -0.008) downScore += 1;
+  if (higherLows) upScore += 1;
+  if (lowerHighs) downScore += 1;
+  if (weekly.length >= 8 && weeklyClose > weeklyMa10 && weeklyMa10 >= weeklyMa30 * 0.998) upScore += 1;
+  if (weekly.length >= 8 && weeklyClose < weeklyMa10 && weeklyMa10 <= weeklyMa30 * 1.002) downScore += 1;
+
+  let trendDirection = "盘整";
+  if (upScore >= 3 && downScore >= 3) trendDirection = "趋势转换中";
+  else if (upScore >= 4 && upScore >= downScore + 2) trendDirection = "上涨";
+  else if (downScore >= 4 && downScore >= upScore + 2) trendDirection = "下跌";
+  else if (upScore >= 3 && downScore <= 1) trendDirection = "上涨";
+  else if (downScore >= 3 && upScore <= 1) trendDirection = "下跌";
+  else if (upScore >= downScore + 2 && upScore >= 3) trendDirection = "上涨";
+  else if (downScore >= upScore + 2 && downScore >= 3) trendDirection = "下跌";
+
+  const agreement = Math.abs(upScore - downScore);
+  let trendConfidence = Math.round((agreement / 5) * 100);
+  if (trendDirection === "趋势转换中") {
+    trendConfidence = Math.max(trendConfidence, Math.round((Math.min(upScore, downScore) / 4) * 100));
+  }
+  if (trendDirection === "盘整") trendConfidence = Math.max(30, Math.min(65, 35 + agreement * 8));
+  if (bars.length < 60) trendConfidence = Math.min(trendConfidence, 70);
+  trendConfidence = Math.max(0, Math.min(100, trendConfidence));
+
+  const highWindow = bars.slice(-Math.min(120, bars.length));
+  const high120 = Math.max(...highWindow.map((item) => Number(item.high)));
+  const drawdown = high120 > 0 ? (high120 - close) / high120 : 0;
+  const low20 = Math.min(...bars.slice(-20).map((item) => Number(item.low)));
+  const rebound = low20 > 0 ? (close - low20) / low20 : 0;
+  const nearestSupport = supportCandidates[0] || null;
+  const recentSupportTouch = Boolean(
+    nearestSupport
+      && nearestSupport.lastTouchDate
+      && bars.slice(-12).some((item) => item.date === nearestSupport.lastTouchDate)
+  );
+  const heldBreakout = breakoutSupports
+    .filter((level) => level.breakoutIndex >= 0 && level.breakoutIndex <= bars.length - 4)
+    .filter((level) => ["pending_retest", "testing", "validated"].includes(level.status))
+    .some((level) => bars.slice(level.breakoutIndex + 1).every((item) => Number(item.close) >= level.price * 0.995));
+
+  let trendStage = "盘整区间";
+  if (trendDirection === "下跌" && rebound >= 0.05 && close < ma60) {
+    trendStage = "超跌反弹";
+  } else if (drawdown >= 0.15 && close > ma20 && trendDirection !== "上涨") {
+    trendStage = "趋势修复";
+  } else if (nearestSupport && nearestSupport.status === "validated" && nearestSupport.source !== "pressure_breakout" && recentSupportTouch && trendDirection === "上涨") {
+    trendStage = "回踩确认";
+  } else if (nearestSupport && nearestSupport.source === "pressure_breakout" && nearestSupport.status === "validated") {
+    trendStage = "回踩确认";
+  } else if (heldBreakout && trendDirection !== "下跌") {
+    trendStage = "突破确认";
+  } else if (trendDirection === "盘整" && (nearestSupport?.touches || 0) >= 2) {
+    trendStage = "震荡筑底";
+  } else if (trendDirection === "上涨") {
+    trendStage = "上涨延续";
+  } else if (trendDirection === "下跌") {
+    trendStage = "下跌延续";
+  } else if (trendDirection === "趋势转换中") {
+    trendStage = close > ma20 ? "趋势修复" : "震荡筑底";
+  }
+
+  return {
+    trendDirection,
+    trendStage,
+    trendConfidence,
+    supportCandidates,
+    resistanceCandidates,
+    supportValidation,
+    resistanceValidation,
+    asOfDate,
+    lookbackBars: bars.length,
+    participatesInScoring: false,
+    allowedStages: STAGE_LABELS,
+  };
+}
+
+function attachStructureRecognition(advice, history) {
+  const structure = recognizeMarketStructure(history);
+  if (!advice || typeof advice !== "object") return advice;
+  return {
+    ...advice,
+    trendDirection: structure.trendDirection,
+    trendStage: structure.trendStage,
+    trendConfidence: structure.trendConfidence,
+    supportCandidates: structure.supportCandidates,
+    resistanceCandidates: structure.resistanceCandidates,
+    supportValidation: structure.supportValidation,
+    resistanceValidation: structure.resistanceValidation,
+  };
+}
+
+function structureCandidateText(candidates) {
+  if (!candidates?.length) return "无";
+  return candidates.slice(0, 3).map((item) => {
+    const bits = [formatPrice(item.price), item.statusLabel || item.status || ""];
+    if (item.touches) bits.push(`${item.touches}次触碰`);
+    if (item.volumeNote) bits.push(item.volumeNote);
+    return bits.filter(Boolean).join(" ");
+  }).join("；");
+}
+
+function structureStatusText(validation) {
+  if (!validation || validation.status === "none" || validation.price == null) {
+    return validation?.basis || validation?.label || "无";
+  }
+  return `${formatPrice(validation.price)} · ${validation.label || validation.status}${validation.basis ? `（${validation.basis}）` : ""}`;
+}
+
+function adviceHasStructureRecognition(advice) {
+  return Boolean(advice && (advice.supportValidation || advice.resistanceValidation || advice.trendConfidence != null));
+}
+
+function structureRecognitionSummaryLines(advice) {
+  if (!adviceHasStructureRecognition(advice)) return [];
+  const confidence = advice.trendConfidence == null || advice.trendConfidence === ""
+    ? "--"
+    : `${Math.round(Number(advice.trendConfidence))}`;
+  return [
+    "结构识别（训练解释，不参与买卖评分）",
+    `趋势方向：${advice.trendDirection || "--"}`,
+    `趋势阶段：${advice.trendStage || "--"}`,
+    `趋势置信度：${confidence}`,
+    `支撑候选：${structureCandidateText(advice.supportCandidates)}`,
+    `压力候选：${structureCandidateText(advice.resistanceCandidates)}`,
+    `支撑验证：${structureStatusText(advice.supportValidation)}`,
+    `压力验证：${structureStatusText(advice.resistanceValidation)}`,
+  ];
+}
+
+function structureRecognitionSectionHtml(advice) {
+  if (!currentReplayCandle()) return "";
+  if (!adviceHasStructureRecognition(advice)) {
+    return `<div class="rule-advice-section structure-recognition-summary" data-structure-layer="training-explanation"><span>结构识别（训练解释，不参与买卖评分）</span><p class="muted">这条建议没有结构识别结果。</p></div>`;
+  }
+  const humanDirection = document.querySelector("#replayTrendDirection")?.value || "";
+  const humanStage = document.querySelector("#replayTrendStage")?.value || "";
+  const humanSupportText = document.querySelector("#replaySupportStatus")?.selectedOptions?.[0]?.textContent || "";
+  const humanEvidenceText = document.querySelector("#replaySupportEvidence")?.selectedOptions?.[0]?.textContent || "";
+  const humanSupport = humanSupportText && humanSupportText !== "未填写" ? humanSupportText : "";
+  const humanEvidence = humanEvidenceText && humanEvidenceText !== "未填写" ? humanEvidenceText : "";
+  const gaps = [];
+  if (humanDirection && advice.trendDirection && humanDirection !== advice.trendDirection) gaps.push("方向与人工不一致");
+  if (humanStage && advice.trendStage && humanStage !== advice.trendStage) gaps.push("阶段与人工不一致");
+  const confidence = advice.trendConfidence == null || advice.trendConfidence === ""
+    ? "--"
+    : `${Math.round(Number(advice.trendConfidence))}`;
+  return `
+    <div class="rule-advice-section structure-recognition-summary" data-structure-layer="training-explanation">
+      <span>结构识别（训练解释，不参与买卖评分）</span>
+      <p>趋势方向：${escapeHtml(advice.trendDirection || "--")}</p>
+      <p>趋势阶段：${escapeHtml(advice.trendStage || "--")}</p>
+      <p>趋势置信度：${escapeHtml(confidence)}</p>
+      <p>支撑候选：${escapeHtml(structureCandidateText(advice.supportCandidates))}</p>
+      <p>压力候选：${escapeHtml(structureCandidateText(advice.resistanceCandidates))}</p>
+      <p>支撑验证：${escapeHtml(structureStatusText(advice.supportValidation))}</p>
+      <p>压力验证：${escapeHtml(structureStatusText(advice.resistanceValidation))}</p>
+      <p class="muted">人工标注：方向 ${escapeHtml(humanDirection || "未填写")} / 阶段 ${escapeHtml(humanStage || "未填写")} / 支撑 ${escapeHtml(humanSupport || "未填写")} / 依据 ${escapeHtml(humanEvidence || "未填写")}</p>
+      ${gaps.length ? `<p class="muted">${escapeHtml(gaps.join("；"))}</p>` : ""}
+    </div>
+  `;
+}
+
+
+function replayServerAdvicePlaceholder(message = "点击AI分析按钮获取当前交易建议") {
+  const loading = replayState.serverAdviceStatus === "loading";
+  return {
+    side: replayState.position ? "sell" : "buy",
+    sideLabel: replayState.position ? "卖出管理" : "买入观察",
+    action: replayState.position ? "hold_position" : "watch",
+    actionText: loading ? "分析中" : "等待AI分析",
+    stage: loading ? "后端分析中" : "尚未分析",
+    model: "后端统一决策模型",
+    score: null,
+    matched: [],
+    missing: [message],
+    plan: [loading ? "等待后端返回当前日期、画线和持仓对应的唯一决策。" : "确认当前画线后点击AI分析。"],
+    pressurePlan: null,
+    stopLoss: null,
+    stopBasis: "",
+    stopRiskPct: null,
+  };
+}
+
+function replayServerAdviceRequestData() {
+  const candle = currentReplayCandle();
+  if (!candle || !replayState.data?.symbol) return null;
+  const nearest = nearestManualLevels();
+  return {
+    symbol: replayState.data.symbol,
+    market: replayState.data.market || "cn",
+    date: candle.date,
+    support: nearest.support?.price || null,
+    resistance: nearest.effectiveResistance?.price || nearest.nearResistance?.price || nearest.resistance?.price || null,
+    levels: (replayState.manualLevels || []).map((level) => ({
+      price: Number(level.price),
+      role: inferredLevelRole(level),
+      reason: level.reason || "",
+    })),
+    history: replayDailyHistory().slice(-700),
+    position: replayState.position || replayMarketPositionForAdvice() || null,
+  };
+}
+
+async function requestReplayServerAdvice({ force = false } = {}) {
+  const payload = replayServerAdviceRequestData();
+  if (!payload) return null;
+  const requestKey = JSON.stringify(payload);
+  const previousAdvice = replayState.serverAdvice;
+  if (!force && replayState.serverAdviceKey === requestKey && ["loading", "loaded"].includes(replayState.serverAdviceStatus)) {
+    return replayState.serverAdvice;
+  }
+  replayState.serverAdviceKey = requestKey;
+  replayState.serverAdviceStatus = "loading";
+  renderRuleAdvice();
+  try {
+    const advice = await fetchReplayServerAdvice(payload);
+    if (replayState.serverAdviceKey !== requestKey) return null;
+    replayState.serverAdvice = advice;
+    replayState.serverAdviceStatus = "loaded";
+    renderRuleAdvice();
+    return replayState.serverAdvice;
+  } catch (error) {
+    if (replayState.serverAdviceKey !== requestKey) return null;
+    replayState.serverAdviceStatus = "error";
+    replayState.serverAdvice = previousAdvice;
+    if (!replayState.serverAdvice) {
+      setStatus("#replayStatus", error.message || "后端交易建议请求失败", "negative");
+    }
+    renderRuleAdvice();
+    return null;
+  }
+}
+
+async function fetchReplayServerAdvice(payload) {
+  if (!payload) throw new Error("缺少后端交易建议请求参数");
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch(apiUrl("/api/replay-advice"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "后端交易建议请求失败");
+    return result.advice || null;
+  } catch (error) {
+    if (error.name === "AbortError") throw new Error("后端分析超过30秒，请重启8766服务后重试");
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function frontendReplayAdvice() {
+  if (!currentReplayCandle()) return null;
+  const history = replayDailyHistory();
+  const input = {
+    history,
+    levels: replayState.manualLevels || [],
+    position: replayState.position || null,
+  };
+  if (window.StrategyCore?.analyze) return window.StrategyCore.analyze(input);
+  return attachStructureRecognition(ruleLibraryAdvice(), history);
+}
+
+function withLiveStructure(advice, { frozen = false } = {}) {
+  if (!advice || frozen || adviceHasStructureRecognition(advice) || !currentReplayCandle()) return advice;
+  return attachStructureRecognition(advice, replayDailyHistory());
+}
+
+function activeReplayAdvice() {
+  const logged = loggedAdviceSnapshotForCurrentCandle();
+  if (logged) return logged;
+  return withLiveStructure(replayState.serverAdvice || frontendReplayAdvice() || replayServerAdvicePlaceholder());
 }
 
 function renderRuleAdvice() {
+  const titleNode = document.querySelector("#ruleAdviceTitle");
   const stageNode = document.querySelector("#ruleAdviceStage");
   const scoreNode = document.querySelector("#ruleAdviceScore");
   const actionNode = document.querySelector("#ruleAdviceActionText");
@@ -4450,8 +5809,15 @@ function renderRuleAdvice() {
   const copyButton = document.querySelector("#copyRuleAdviceSummary");
   const executeButton = document.querySelector("#executeRuleAdvice");
   if (!stageNode || !scoreNode || !bodyNode) return;
-  const advice = ruleLibraryAdvice();
-  if (!replayState.writeTraining && replayState.marketPosition?.status === "held" && !replayMarketPositionForAdvice()) {
+  const loggedAdvice = loggedAdviceSnapshotForCurrentCandle();
+  let advice = loggedAdvice || replayState.serverAdvice || frontendReplayAdvice() || replayServerAdvicePlaceholder();
+  if (titleNode) {
+    const data = replayState.data || {};
+    const symbol = displaySecuritySymbol(data, data.symbol || document.querySelector("#replaySymbol")?.value?.trim() || "--");
+    const name = data.name || document.querySelector("#replayStockSearch")?.dataset.name || "";
+    titleNode.textContent = name ? `AI\u7b56\u7565 (${symbol} ${name})` : `AI\u7b56\u7565 (${symbol})`;
+  }
+  if (!loggedAdvice && !replayState.writeTraining && replayState.marketPosition?.status === "held" && !replayMarketPositionForAdvice()) {
     advice.side = "sell";
     advice.sideLabel = "\u5356\u51fa\u89c2\u5bdf";
     advice.action = "hold_position";
@@ -4463,6 +5829,7 @@ function renderRuleAdvice() {
     advice.missing = ["\u9700\u8981\u4e70\u5165\u65e5\u671f", "\u9700\u8981\u4e70\u5165\u4ef7\u683c", "\u9700\u8981\u6b62\u635f\u4ef7\u683c"];
     advice.plan = ["\u8865\u5145\u6301\u4ed3\u4fe1\u606f\u540e\uff0cAI\u5c06\u6309\u5356\u51fa\u89c2\u5bdf\u65b9\u5411\u8bc4\u4f30\u3002"];
   }
+  if (!loggedAdvice) advice = withLiveStructure(advice);
   const hasCandle = Boolean(currentReplayCandle());
   if (copyButton) copyButton.disabled = !hasCandle;
   if (executeButton) executeButton.disabled = !hasCandle;
@@ -4481,15 +5848,41 @@ function renderRuleAdvice() {
     return `<ol>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ol>`;
   };
   const pressureLevelText = (level) => level ? `${formatPrice(level.price)} - ${levelRoleLabel(inferredLevelRole(level))}` : "未画";
+  const supportStatusLabel = (level) => {
+    if (!level) return "未画";
+    const role = inferredLevelRole(level);
+    if (role === "pending_support") return "突破后待回踩确认";
+    if (level.validationStatus === "validated") return "已验证";
+    if (level.validationStatus === "broken") return "已失效";
+    if (level.validationStatus === "testing") return "验证中";
+    return "候选";
+  };
   const pressurePlan = advice.pressurePlan || {};
+  const planItems = [...(advice.plan || [])];
+  if (advice.stopLoss != null && Number(advice.stopLoss) > 0) {
+    planItems.push(`\u6b62\u635f\u4ef7\uff1a${formatPrice(advice.stopLoss)}${advice.stopBasis ? `\uff08${advice.stopBasis}\uff09` : ""}`);
+  }
+  const trainingPosition = replayState.writeTraining ? replayState.position : null;
+  const positionEntryDate = trainingPosition?.entryDate || "--";
+  const positionEntryPrice = Number(trainingPosition?.entryPrice) > 0 ? formatPrice(trainingPosition.entryPrice) : "--";
+  const positionStopLoss = Number(trainingPosition?.stopLoss) > 0 ? formatPrice(trainingPosition.stopLoss) : "--";
   bodyNode.innerHTML = `
+    ${loggedAdvice ? `<div class="rule-advice-section"><span>\u5386\u53f2\u5efa\u8bae</span><p>\u5f53\u524d\u663e\u793a\u7684\u662f\u8be5\u4ea4\u6613\u65e5\u6267\u884c\u65f6\u4fdd\u5b58\u7684AI\u5efa\u8bae\uff0c\u4e0d\u662f\u6309\u5f53\u524d\u6301\u4ed3\u72b6\u6001\u91cd\u65b0\u8ba1\u7b97\u7684\u5efa\u8bae\u3002</p></div>` : ""}
     <div class="rule-advice-section">
       <span>当前状态</span>
       <p>${!replayState.writeTraining ? (replayState.marketPosition?.status === "held" ? "\u5df2\u6301\u4ed3" : "\u672a\u6301\u4ed3") : escapeHtml(advice.sideLabel || "--")}</p>
     </div>
+    ${trainingPosition ? `<div class="rule-advice-section"><span>买入信息</span><p>买入日期：${escapeHtml(positionEntryDate)}</p><p>买入价：${escapeHtml(positionEntryPrice)}</p><p>止损价：${escapeHtml(positionStopLoss)}</p></div>` : ""}
     <div class="rule-advice-section">
       <span>当前阶段</span>
       <p>${escapeHtml(advice.stage || "--")}</p>
+    </div>
+    ${structureRecognitionSectionHtml(advice)}
+    <div class="rule-advice-section">
+      <span>支撑验证</span>
+      <p>当前支撑：${escapeHtml(pressureLevelText(nearestManualLevels().support))}</p>
+      <p>状态：${escapeHtml(supportStatusLabel(nearestManualLevels().support))}</p>
+      <p>依据：${escapeHtml(document.querySelector("#replaySupportEvidence")?.selectedOptions?.[0]?.textContent || "未填写")}</p>
     </div>
     <div class="rule-advice-section">
       <span>压力分层</span>
@@ -4512,7 +5905,7 @@ function renderRuleAdvice() {
     </div>
     <div class="rule-advice-section">
       <span>交易计划</span>
-      ${listHtml(advice.plan || [])}
+      ${listHtml(planItems)}
     </div>
   `;
 }
@@ -4528,6 +5921,7 @@ function ruleAdviceSummaryText(advice = currentAiAdviceSnapshot()) {
   const nearPressureText = pressurePlan.near ? formatPrice(pressurePlan.near.price) : "未画";
   const effectivePressureText = pressurePlan.effective ? formatPrice(pressurePlan.effective.price) : "未画";
   const breakoutTargetText = pressurePlan.breakoutTarget ? formatPrice(pressurePlan.breakoutTarget.price) : "未画";
+  const trainingPosition = replayState.writeTraining ? replayState.position : null;
   return [
     "AI建议摘要",
     `日期：${candle?.date || "--"}`,
@@ -4539,7 +5933,11 @@ function ruleAdviceSummaryText(advice = currentAiAdviceSnapshot()) {
     `突破目标：${breakoutTargetText}`,
     `盈亏比口径：${pressurePlanSummary(pressurePlan)}`,
     `操作建议：${advice.actionText || "建议观望"}`,
+    trainingPosition ? `买入日期：${trainingPosition.entryDate || "--"}` : "",
+    trainingPosition ? `买入价：${Number(trainingPosition.entryPrice) > 0 ? formatPrice(trainingPosition.entryPrice) : "--"}` : "",
+    trainingPosition ? `止损价：${Number(trainingPosition.stopLoss) > 0 ? formatPrice(trainingPosition.stopLoss) : "--"}` : "",
     advice.stage ? `当前阶段：${advice.stage}` : "",
+    ...structureRecognitionSummaryLines(advice),
     advice.model ? `匹配模型：${advice.model}` : "",
     advice.score == null ? "" : `匹配度：${advice.score}分`,
   ].filter(Boolean).join("\n");
@@ -4619,10 +6017,12 @@ function aiAdviceReasonText(advice = currentAiAdviceSnapshot()) {
   ].filter(Boolean).join("；");
 }
 
-function aiStopLossSuggestion() {
+function aiStopLossSuggestion(advice = currentAiAdviceSnapshot()) {
+  const adviceStop = Number(advice?.stopLoss);
+  if (Number.isFinite(adviceStop) && adviceStop > 0) return adviceStop;
   const candle = currentReplayCandle();
-  if (!candle) return null;
-  return Math.min(Number(candle.open) || 0, Number(candle.close) || 0) || null;
+  if (!candle) return 0;
+  return Math.min(Number(candle.open) || 0, Number(candle.close) || 0) || 0;
 }
 
 function applyAiAdviceToDecisionFields(advice = currentAiAdviceSnapshot()) {
@@ -4631,14 +6031,14 @@ function applyAiAdviceToDecisionFields(advice = currentAiAdviceSnapshot()) {
     const buyReason = document.querySelector("#replayBuyReason");
     const stopLoss = document.querySelector("#replayStopLoss");
     const stopLossReason = document.querySelector("#replayStopLossReason");
-    const stop = aiStopLossSuggestion();
+    const stop = aiStopLossSuggestion(advice);
     if (buyReason) {
       buyReason.value = reasonText;
       buyReason.focus();
     }
     if (stopLoss && stop) stopLoss.value = formatPrice(stop);
     if (stopLossReason) {
-      stopLossReason.value = `AI建议：以当前买入触发K线实体下沿 ${stop ? formatPrice(stop) : "--"} 作为止损依据；模型：${advice.model || "--"}`;
+      stopLossReason.value = `AI建议：以${advice.stopBasis || "结构止损位"} ${stop ? formatPrice(stop) : "--"} 作为止损依据；模型：${advice.model || "--"}`;
     }
     updateBuyStopLossVisibility({ clearWhenHidden: false });
     return "buy";
@@ -4666,11 +6066,16 @@ function executeRuleAdvice() {
     return;
   }
   const advice = currentAiAdviceSnapshot();
+  if (!advice.action) {
+    setStatus("#replayStatus", "AI暂无操作建议，请先画出支撑压力线。", "negative");
+    return;
+  }
+  // 自动按AI建议执行，自动进入下一日
   const action = applyAiAdviceToDecisionFields(advice);
-  const actionText = action === "buy" ? "买入" : action === "sell" ? "卖出" : "观望";
   replayState.aiAdviceFeedback = isActionableAiAdvice(advice) ? "accepted" : null;
   updateAiAdviceFeedbackUi();
-  setStatus("#replayStatus", `已将AI建议填入${actionText}操作区，请确认后点击${actionText}。`, action === "hold" ? "neutral" : "positive");
+  saveReplayDecision(action);
+  // saveReplayDecision 内部已有 cursor+=1 的逻辑
 }
 
 function aiMismatchReason(action, advice = currentAiAdviceSnapshot()) {
@@ -4686,12 +6091,20 @@ function inferAiAdviceFeedback(action, reason, note, advice = currentAiAdviceSna
 
 
 function currentAiAdviceSnapshot() {
-  const advice = ruleLibraryAdvice();
+  const advice = activeReplayAdvice();
   return {
+    trendDirection: advice.trendDirection || advice.trend?.direction || "",
+    trendStage: advice.trendStage || advice.stage || "",
+    trendConfidence: advice.trendConfidence ?? null,
+    supportCandidates: advice.supportCandidates || [],
+    resistanceCandidates: advice.resistanceCandidates || [],
+    supportValidation: advice.supportValidation || null,
+    resistanceValidation: advice.resistanceValidation || null,
     side: advice.side || "",
     sideLabel: advice.sideLabel || "",
     action: advice.action || "",
     actionText: advice.actionText || "",
+    reasonText: aiAdviceReasonText(advice),
     stage: advice.stage || "",
     model: advice.model || "",
     score: advice.score == null ? null : Math.round(advice.score),
@@ -4699,13 +6112,60 @@ function currentAiAdviceSnapshot() {
     missing: advice.missing || [],
     plan: advice.plan || [],
     pressurePlan: advice.pressurePlan || null,
+    stopLoss: advice.stopLoss || null,
+    stopBasis: advice.stopBasis || "",
+    stopRiskPct: advice.stopRiskPct == null ? null : advice.stopRiskPct,
   };
+}
+
+function createReplayActionId(action, date) {
+  return `${replayState.sessionId || "session"}-${date || "date"}-${action || "action"}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function normalizeLoggedAdviceSnapshot(record) {
+  const snapshot = record?.aiAdviceSnapshot || null;
+  const loggedAction = ["buy", "sell"].includes(record?.action) ? record.action : "";
+  const action = snapshot?.action || record?.aiAdviceAction || loggedAction;
+  const actionText = snapshot?.actionText || record?.aiAdviceText || (loggedAction ? replayActionLabel(loggedAction) : "");
+  if (!snapshot && !action && !actionText) return null;
+  return {
+    side: snapshot?.side || record?.aiAdviceSide || "",
+    sideLabel: snapshot?.sideLabel || "",
+    action,
+    actionText,
+    reasonText: snapshot?.reasonText || record?.reason || record?.note || "",
+    stage: snapshot?.stage || record?.aiAdviceStage || "",
+    model: snapshot?.model || record?.aiAdviceModel || "",
+    score: snapshot?.score ?? record?.aiAdviceScore ?? null,
+    matched: snapshot?.matched || [],
+    missing: snapshot?.missing || [],
+    plan: snapshot?.plan || [],
+    pressurePlan: snapshot?.pressurePlan || null,
+    trendDirection: snapshot && (snapshot.supportValidation || snapshot.resistanceValidation || snapshot.trendConfidence != null) ? (snapshot.trendDirection || "") : "",
+    trendStage: snapshot && (snapshot.supportValidation || snapshot.resistanceValidation || snapshot.trendConfidence != null) ? (snapshot.trendStage || "") : "",
+    trendConfidence: snapshot?.trendConfidence ?? null,
+    supportCandidates: snapshot?.supportCandidates || [],
+    resistanceCandidates: snapshot?.resistanceCandidates || [],
+    supportValidation: snapshot?.supportValidation || null,
+    resistanceValidation: snapshot?.resistanceValidation || null,
+    stopLoss: snapshot?.stopLoss || record?.stopLoss || null,
+    stopBasis: snapshot?.stopBasis || record?.stopLossReason || "",
+    stopRiskPct: snapshot?.stopRiskPct == null ? null : snapshot.stopRiskPct,
+  };
+}
+
+function loggedAdviceSnapshotForCurrentCandle() {
+  const candle = currentReplayCandle();
+  if (!candle) return null;
+  const entries = (replayState.log || []).filter((record) => record.date === candle.date);
+  const withAdvice = entries.find((record) => normalizeLoggedAdviceSnapshot(record));
+  return normalizeLoggedAdviceSnapshot(withAdvice);
 }
 
 function refreshReplayAdviceFromLevels({ resetFeedback = false } = {}) {
   syncManualLevelInputs();
   if (replayState.backtestMode) updateBacktestLevelUi();
-  if (!replayState.backtestMode) renderRuleAdvice();
+  if (!replayState.backtestMode) requestReplayServerAdvice();
   drawReplayChart();
   if (resetFeedback && !replayState.backtestMode) resetAiAdviceFeedback();
 }
@@ -4729,6 +6189,36 @@ function syncReplayPositionFromLog() {
   replayState.position = restoredState.position;
 }
 
+function deletePersistedReplayAction(record) {
+  if (!record) return;
+  const payload = record.id != null
+    ? { id: record.id }
+    : record.clientActionId
+      ? { clientActionId: record.clientActionId }
+      : {
+          sessionId: replayState.sessionId,
+          date: record.date,
+          action: record.action,
+        };
+  fetch(apiUrl("/api/delete-trade-replay-record"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).catch(() => {});
+}
+
+function undoReplayActionsForDate(date) {
+  if (!date) return [];
+  const removed = [];
+  replayState.log = (replayState.log || []).filter((record) => {
+    const shouldUndo = record.date === date && (record.action === "buy" || record.action === "sell");
+    if (shouldUndo) removed.push(record);
+    return !shouldUndo;
+  });
+  removed.forEach(deletePersistedReplayAction);
+  return removed;
+}
+
 function clearReplayDecisionInputs() {
   const buyReason = document.querySelector("#replayBuyReason");
   const stopLoss = document.querySelector("#replayStopLoss");
@@ -4748,6 +6238,100 @@ function navigateReplayCandle(step) {
   if (!replayState.data) return;
   const daily = replayState.data.timeframes.daily || [];
   if (!daily.length) return;
+  let undoMessage = "";
+
+  // 前进到下一日时，自动按AI建议执行买入/卖出/观望
+  if (step > 0) {
+    const advice = currentAiAdviceSnapshot();
+    const actionable = isActionableAiAdvice(advice);
+    if (actionable) {
+      const action = advice.action; // "buy" or "sell"
+      // 直接用 AI 建议内容执行，不依赖 DOM
+      const reasonText = aiAdviceReasonText(advice);
+      const stopLossPrice = aiStopLossSuggestion(advice);
+      const thisCandle = currentReplayCandle();
+      const annotations = replayTrainingAnnotations(advice);
+      const clientActionId = createReplayActionId(action, thisCandle?.date || "");
+      const payload = {
+        ...annotations,
+        clientActionId,
+        symbol: replayState.data.symbol,
+        market: replayState.data.market || "cn",
+        displaySymbol: displaySecuritySymbol(replayState.data, replayState.data.symbol),
+        sessionId: replayState.sessionId,
+        recordType: activeView === "simulation" ? "simulation" : "training",
+        trainingStartDate: replayState.trainingStartDate || replayState.data.startDate,
+        date: thisCandle?.date || "",
+        action: action,
+        reason: reasonText,
+        price: thisCandle?.close || 0,
+        stopLoss: stopLossPrice || 0,
+        stopLossReason: stopLossPrice ? `AI建议止损：${formatPrice(stopLossPrice)}` : "",
+        aiAdviceAction: advice.action,
+        aiAdviceText: advice.actionText,
+        aiAdviceScore: advice.score,
+        aiAdviceModel: advice.model,
+        aiAdviceStage: advice.stage,
+        aiAdviceSide: advice.side,
+        aiAdviceAccepted: true,
+        aiAdviceSnapshot: advice,
+      };
+      replayState.aiAdviceFeedback = "accepted";
+      updateAiAdviceFeedbackUi();
+      // 保存决策（异步，不阻塞）
+      fetch(apiUrl("/api/trade-replay-decision"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }).catch(() => {});
+      // 更新本地状态
+      if (action === "buy") {
+        replayState.position = { entryDate: payload.date, entryPrice: payload.price, reason: reasonText, stopLoss: stopLossPrice || 0 };
+      } else if (action === "sell") {
+        const entryPrice = Number(replayState.position?.entryPrice) || 0;
+        if (entryPrice > 0) replayState.equity = (replayState.equity || 1) * (payload.price / entryPrice);
+        replayState.position = null;
+      }
+      // 记录日志 - 确保在 navigateToNextCandle 之前有完整记录
+      const logEntry = {
+        action,
+        label: replayActionLabel(action),
+        clientActionId,
+        date: payload.date,
+        price: payload.price,
+        reason: reasonText,
+        note: "",
+        stopLoss: action === "buy" ? (stopLossPrice || 0) : null,
+        aiAdviceAction: advice.action,
+        aiAdviceText: advice.actionText,
+        aiAdviceScore: advice.score,
+        aiAdviceModel: advice.model,
+        aiAdviceStage: advice.stage,
+        aiAdviceSide: advice.side,
+        aiAdviceAccepted: true,
+        aiAdviceSnapshot: advice,
+      };
+      replayState.log.push(logEntry);
+      console.log("AI自动执行:", logEntry); // debug
+    }
+  } else if (step < 0) {
+    const targetIndex = Math.max(0, Math.min(daily.length - 1, replayState.cursor + step));
+    const targetDate = daily[targetIndex]?.date || "";
+    const removed = undoReplayActionsForDate(targetDate);
+    if (removed.length) {
+      undoMessage = `已撤回 ${targetDate} 的${removed.map((record) => replayActionLabel(record.action)).join("、")}操作；再次点下一日会重新按AI建议执行。`;
+    }
+  }
+  // 总是进入下一日
+  navigateToNextCandle(daily, step);
+  if (undoMessage) setStatus("#replayStatus", undoMessage, "neutral");
+}
+
+function logForDate(date) {
+  return (replayState.log || []).filter((r) => r.date === date);
+}
+
+function navigateToNextCandle(daily, step) {
   const nextCursor = Math.max(0, Math.min(daily.length - 1, replayState.cursor + step));
   if (nextCursor === replayState.cursor) {
     setStatus("#replayStatus", step < 0 ? "已经是本次训练的最早K线。" : "已经是最后一根K线。", "neutral");
@@ -4760,13 +6344,26 @@ function navigateReplayCandle(step) {
   const candle = currentReplayCandle();
   const previousCandle = step > 0 ? daily[nextCursor - 1] : null;
   const conversionMessage = step > 0 ? convertBrokenPressureToSupport(previousCandle, candle) : "";
+  const validationMessage = step > 0 ? updateDynamicLevelValidation(previousCandle, candle) : "";
   const hasAnnotation = (replayState.log || []).some((record) => record.date === candle?.date);
   replayState.selectedNoteDate = hasAnnotation ? candle.date : null;
   clearReplayDecisionInputs();
   syncReplayPositionFromLog();
+  invalidateReplayServerAdvice();
   updateReplayUi();
-  const message = `${step < 0 ? "已回到" : "已跳到"}${candle?.date || "--"}，本次仅浏览，不写入训练集。`;
-  setStatus("#replayStatus", conversionMessage ? `${message}${conversionMessage}` : message, "neutral");
+  // 显示该日交易信息（从log中查找）
+  const logEntries = logForDate(candle?.date || "");
+  if (logEntries.length > 0) {
+    const entry = logEntries[0];
+    const actionText = entry.action === "buy" ? "买入" : entry.action === "sell" ? "卖出" : "观望";
+    const stopInfo = entry.stopLoss ? ` 止损:${formatPrice(entry.stopLoss)}` : "";
+    const reasonText = entry.reason ? ` 理由:${entry.reason}` : "";
+    setStatus("#replayStatus", `${candle?.date} ${actionText} ${formatPrice(entry.price)}${stopInfo}${reasonText}`);
+  } else {
+    const message = `${step < 0 ? "已回到" : "已进入"}${candle?.date || "--"}。`;
+    const levelMessage = [conversionMessage, validationMessage].filter(Boolean).join("；");
+    setStatus("#replayStatus", levelMessage ? `${message}${levelMessage}` : message, "neutral");
+  }
 }
 
 function updateReplayUi() {
@@ -4795,9 +6392,15 @@ function updateReplayUi() {
   totalReturnNode.textContent = `${totalReturn.toFixed(2)}%`;
   totalReturnNode.className = totalReturn === 0 ? "" : totalReturn > 0 ? "positive-text" : "negative-text";
   updateReplayBlindUi();
-  document.querySelector("#replayBuy").disabled = !replayState.data || Boolean(replayState.position);
-  document.querySelector("#replaySell").disabled = !replayState.data || !replayState.position;
-  document.querySelector("#replayHold").disabled = !replayState.data;
+  // 隐藏手动决策按钮（自动模式已替代）
+  const buyBtn = document.querySelector("#replayBuy");
+  const sellBtn = document.querySelector("#replaySell");
+  const holdBtn = document.querySelector("#replayHold");
+  if (buyBtn) buyBtn.style.display = "none";
+  if (sellBtn) sellBtn.style.display = "none";
+  if (holdBtn) holdBtn.style.display = "none";
+  const decisionActions = document.querySelector(".decision-actions");
+  if (decisionActions) decisionActions.style.display = "none";
   const daily = replayState.data?.timeframes?.daily || [];
   document.querySelector("#replayPrevCandle").disabled = !replayState.data || replayState.cursor <= 0;
   document.querySelector("#replayNextCandle").disabled = !replayState.data || replayState.cursor >= daily.length - 1;
@@ -4818,10 +6421,34 @@ function updateReplayUi() {
   `).join("");
   renderRuleAdvice();
   drawReplayChart();
+  requestReplayServerAdvice();
+}
+
+function invalidateReplayServerAdvice() {
+  replayState.serverAdvice = null;
+  replayState.serverAdviceKey = "";
+  replayState.serverAdviceStatus = "idle";
+  renderRuleAdvice();
+}
+
+function replayTrainingAnnotations(advice = currentAiAdviceSnapshot()) {
+  return {
+    aiTrendDirection: advice.trendDirection || advice.trend?.direction || "",
+    aiTrendStage: advice.trendStage || advice.stage || "",
+    aiTrendConfidence: advice.trendConfidence ?? null,
+    aiSupportValidation: advice.supportValidation || null,
+    aiResistanceValidation: advice.resistanceValidation || null,
+    humanTrendDirection: document.querySelector("#replayTrendDirection")?.value || "",
+    humanTrendStage: document.querySelector("#replayTrendStage")?.value || "",
+    supportStatus: document.querySelector("#replaySupportStatus")?.value || "",
+    supportValidationEvidence: document.querySelector("#replaySupportEvidence")?.value || "",
+    structure: document.querySelector("#replayStructure")?.value.trim() || "",
+  };
 }
 
 function replayPayload(action, reason, note, shouldWrite = replayState.writeTraining) {
   const candle = currentReplayCandle();
+  const clientActionId = createReplayActionId(action, candle?.date || "");
   const stopLoss = Number(document.querySelector("#replayStopLoss").value) || null;
   const stopLossReason = document.querySelector("#replayStopLossReason").value.trim();
   const aiAdviceSnapshot = currentAiAdviceSnapshot();
@@ -4831,17 +6458,20 @@ function replayPayload(action, reason, note, shouldWrite = replayState.writeTrai
   const support = Number(document.querySelector("#replaySupport").value) || null;
   const resistance = Number(document.querySelector("#replayResistance").value) || null;
   const pressurePlan = aiAdviceSnapshot.pressurePlan || pressurePlanFromLevels(nearest, {});
+  const annotations = replayTrainingAnnotations(aiAdviceSnapshot);
   return {
+    clientActionId,
     symbol: replayState.data.symbol,
     market: replayState.data.market || "cn",
     displaySymbol: displaySecuritySymbol(replayState.data, replayState.data.symbol),
     sessionId: replayState.sessionId,
+    recordType: activeView === "simulation" ? "simulation" : "training",
     trainingStartDate: replayState.trainingStartDate || replayState.data.startDate,
     action,
     date: candle.date,
     price: candle.close,
     timeframe: replayState.frame,
-    structure: document.querySelector("#replayStructure").value.trim(),
+    ...annotations,
     support,
     resistance,
     supportEvidence: support ? "manual_line" : "",
@@ -4880,16 +6510,17 @@ async function saveReplayDecision(action) {
   if (!candle) return;
   const aiAdviceSnapshot = currentAiAdviceSnapshot();
   const actionableAiAdvice = isActionableAiAdvice(aiAdviceSnapshot);
-  const buyReason = document.querySelector("#replayBuyReason").value.trim();
-  const stopLoss = Number(document.querySelector("#replayStopLoss").value) || 0;
-  const stopLossReason = document.querySelector("#replayStopLossReason").value.trim();
-  const sellReason = document.querySelector("#replaySellReason").value.trim();
-  const holdNote = document.querySelector("#replayHoldNote").value.trim();
+  // 自动模式下，买入理由和止损由AI建议生成
+  const buyReason = aiAdviceSnapshot.reasonText || "";
+  const stopLoss = aiStopLossSuggestion(aiAdviceSnapshot) || 0;
+  const stopLossReason = `AI建议止损：${formatPrice(stopLoss)}`;
+  const sellReason = aiAdviceSnapshot.reasonText || "";
+  const holdNote = "";
   if (action === "buy" && !buyReason) {
     setStatus("#replayStatus", "买入前需要填写买入理由。", "negative");
     return;
   }
-  if (action === "buy" && stopLoss <= 0) {
+  if (action === "buy" && (!stopLoss || stopLoss <= 0)) {
     setStatus("#replayStatus", "买入前需要填写止损价格。", "negative");
     return;
   }
@@ -4923,7 +6554,27 @@ async function saveReplayDecision(action) {
     if (entryPrice > 0) replayState.equity = (replayState.equity || 1) * (candle.close / entryPrice);
     replayState.position = null;
   }
-  replayState.log.push({ action, label: replayActionLabel(action), date: candle.date, price: candle.close, reason, note, stopLoss: action === "buy" ? stopLoss : null, stopLossReason: action === "buy" ? stopLossReason : "", equity: replayState.equity || 1 });
+  replayState.log.push({
+    action,
+    label: replayActionLabel(action),
+    clientActionId: payload.clientActionId,
+    date: candle.date,
+    price: candle.close,
+    reason,
+    note,
+    stopLoss: action === "buy" ? stopLoss : null,
+    stopLossReason: action === "buy" ? stopLossReason : "",
+    equity: replayState.equity || 1,
+    aiAdviceAction: aiAdviceSnapshot.action,
+    aiAdviceText: aiAdviceSnapshot.actionText,
+    aiAdviceScore: aiAdviceSnapshot.score,
+    aiAdviceModel: aiAdviceSnapshot.model,
+    aiAdviceStage: aiAdviceSnapshot.stage,
+    aiAdviceSide: aiAdviceSnapshot.side,
+    aiAdviceAccepted: actionableAiAdvice ? (action === aiAdviceSnapshot.action) : null,
+    aiAdviceDisagreeReason: actionableAiAdvice && action !== aiAdviceSnapshot.action ? aiMismatchReason(action, aiAdviceSnapshot) : "",
+    aiAdviceSnapshot,
+  });
   replayState.selectedNoteDate = note ? candle.date : null;
   if (action === "buy") {
     document.querySelector("#replayBuyReason").value = "";
@@ -4944,12 +6595,13 @@ async function saveReplayDecision(action) {
     replayState.dragOffset = 0;
     const currentCandle = currentReplayCandle();
     const conversionMessage = convertBrokenPressureToSupport(previousCandle, currentCandle);
+    const validationMessage = updateDynamicLevelValidation(previousCandle, currentCandle);
     const breakAutoMessage = autoDrawAfterLevelBreak(previousCandle, currentCandle);
     const actionText = action === "buy" ? "买入" : action === "sell" ? "卖出" : "观望";
     const message = replayState.writeTraining && action === "hold" && !note
       ? "空备注观望不写入训练集，已进入下一根K线。"
       : `${shouldWrite ? "已写入" : "测试记录"}${actionText}，进入下一根K线。`;
-    const levelMessages = [conversionMessage, breakAutoMessage].filter(Boolean).join("");
+    const levelMessages = [conversionMessage, validationMessage, breakAutoMessage].filter(Boolean).join("");
     setStatus("#replayStatus", levelMessages ? `${message}${levelMessages}` : message, shouldWrite ? "positive" : "neutral");
   }
   updateReplayUi();
@@ -4979,6 +6631,10 @@ async function loadTradeReplay({ button, symbol, date, market = null, blind = fa
     const replayDateInput = document.querySelector("#replayDate");
     if (replayDateInput && !blind && data.startDate) {
       replayDateInput.value = data.startDate;
+    }
+    const searchInput = document.querySelector("#replayStockSearch");
+    if (searchInput && !replayState.blindMode && !searchInput.value.trim()) {
+      searchInput.value = data.name ? `${data.name} ${displaySymbol}` : displaySymbol;
     }
     const savedLevelStateExists = hasSavedReplayLevelState(data, data.startDate);
     const savedLevels = loadSavedReplayLevels(data, data.startDate);
@@ -5017,6 +6673,9 @@ async function loadTradeReplay({ button, symbol, date, market = null, blind = fa
       autoLevelSnapshot: null,
       levelCorrections: [],
       dragLevelStart: null,
+      serverAdvice: null,
+      serverAdviceKey: "",
+      serverAdviceStatus: "idle",
     };
     document.querySelectorAll(".timeframe-button:not(.market-timeframe-button)").forEach((item) => item.classList.toggle("active", item.dataset.frame === "daily"));
     const historyCount = data.availableHistory || data.cursor + 1;
@@ -5025,6 +6684,7 @@ async function loadTradeReplay({ button, symbol, date, market = null, blind = fa
       ? `已加载当前日前${requestedLookback}根K线。`
       : `当前日期前只有${historyCount}根可用K线，已加载此前全部可用K线。`;
     updateReplayUi();
+    startReplayRealtimePolling();
     const autoResult = savedLevelStateExists ? null : autoDrawLevelLines({ silent: true });
     const autoMessage = savedLevelStateExists
       ? `\u5df2\u8bfb\u53d6\u4e0a\u6b21\u4fdd\u5b58\u7684 ${savedLevels.length} \u6761\u652f\u6491\u538b\u529b\u7ebf\u3002`
@@ -5041,10 +6701,73 @@ async function loadTradeReplay({ button, symbol, date, market = null, blind = fa
 }
 
 async function startTradeReplay() {
+  if (activeView === "simulation") {
+    await startSimulationTrading();
+    return;
+  }
   replayState.blindMode = false;
   const symbol = document.querySelector("#replaySymbol").value.trim();
   const date = document.querySelector("#replayDate").value;
   await loadTradeReplay({ button: document.querySelector("#startReplay"), symbol, date, blind: false });
+}
+
+let simulationRecordFilter = "open";
+
+function renderSimulationRecords(records = []) {
+  const list = document.querySelector("#simulationRecordList");
+  if (!list) return;
+  const positions = new Map();
+  [...records].sort((a, b) => String(a.savedAt || a.date).localeCompare(String(b.savedAt || b.date))).forEach((record) => {
+    const key = `${record.market || "cn"}:${record.symbol}`;
+    if (record.action === "buy") positions.set(key, true);
+    if (record.action === "sell") positions.delete(key);
+  });
+  const visible = records.filter((record) => simulationRecordFilter === "all" || positions.has(`${record.market || "cn"}:${record.symbol}`));
+  list.innerHTML = visible.length ? visible.map((record) => `
+    <article class="dataset-row">
+      <div class="dataset-main">
+        <div class="dataset-title-row"><strong>${escapeHtml(record.displaySymbol || record.symbol || "--")} ${escapeHtml(record.name || "")}</strong><span class="dataset-return">${record.action === "buy" ? "买入" : record.action === "sell" ? "卖出" : "观望"}</span></div>
+        <p>${escapeHtml(record.date || "--")} · 价格 ${formatPrice(record.price)} · ${positions.has(`${record.market || "cn"}:${record.symbol}`) ? "持仓中" : "已完成"}</p>
+        <small>${escapeHtml(record.reason || record.note || "无备注")} · ${record.savedAt ? new Date(record.savedAt).toLocaleString() : ""}</small>
+      </div>
+    </article>`).join("") : `<div class="dataset-empty">暂无模拟交易记录</div>`;
+}
+
+async function loadSimulationRecords() {
+  const status = document.querySelector("#simulationRecordsStatus");
+  try {
+    if (status) status.textContent = "正在加载模拟交易记录...";
+    const response = await fetch(apiUrl("/api/trade-replay-records?type=simulation"), { cache: "no-store" });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "模拟交易记录加载失败");
+    renderSimulationRecords(result.records || []);
+    if (status) status.textContent = `共 ${result.count || 0} 笔模拟交易`;
+  } catch (error) {
+    if (status) status.textContent = error.message;
+  }
+}
+
+async function startSimulationTrading() {
+  const button = document.querySelector("#startReplay");
+  replayState.writeTraining = true;
+  replayState.blindMode = false;
+  updateReplayWriteToggle();
+  const symbol = document.querySelector("#replaySymbol").value.trim();
+  const date = document.querySelector("#replayDate").value;
+  await loadTradeReplay({ button, symbol, date, blind: false, loadingText: "正在加载行情..." });
+  await addCurrentReplayToWatchlist();
+}
+
+function updateSimulationUi() {
+  const simulation = activeView === "simulation";
+  const title = document.querySelector("#replayTitle");
+  const description = title?.parentElement?.querySelector("p");
+  const startButton = document.querySelector("#startReplay");
+  document.querySelector("#startBlindReplay")?.classList.toggle("hidden", simulation);
+  document.querySelector("#replayWriteToggle")?.classList.toggle("hidden", simulation);
+  if (title) title.textContent = simulation ? "模拟交易" : "交易思维训练";
+  if (description) description.textContent = simulation ? "选择股票和日期，查看行情并加入股票池" : "只显示当前日期之前的K线，逐根推进并保存决策样本";
+  if (startButton) startButton.textContent = simulation ? "加入股票池" : "开始训练";
 }
 
 async function startBlindTradeReplay() {
@@ -5222,7 +6945,24 @@ function currentBacktestCandle() {
 
 function currentBacktestAdvice() {
   if (!replayState.backtestMode || !currentReplayCandle()) return null;
-  return ruleLibraryAdvice();
+  return backtestState.serverAdvice || replayServerAdvicePlaceholder();
+}
+
+async function requestBacktestAdvice({ force = false } = {}) {
+  if (!replayState.backtestMode || !currentReplayCandle()) return null;
+  const payload = replayServerAdviceRequestData();
+  const requestKey = JSON.stringify(payload);
+  if (!force && backtestState.serverAdviceKey === requestKey && backtestState.serverAdvice) {
+    return backtestState.serverAdvice;
+  }
+  backtestState.serverAdviceKey = requestKey;
+  backtestState.serverAdvice = null;
+  renderBacktestAdvice(replayServerAdvicePlaceholder());
+  const advice = await fetchReplayServerAdvice(payload);
+  if (backtestState.serverAdviceKey !== requestKey) return null;
+  backtestState.serverAdvice = advice;
+  renderBacktestAdvice(advice);
+  return advice;
 }
 
 function renderBacktestAdvice(advice = currentBacktestAdvice()) {
@@ -5237,6 +6977,13 @@ function renderBacktestAdvice(advice = currentBacktestAdvice()) {
   modelNode.textContent = advice?.model || "--";
   scoreNode.textContent = advice?.score == null ? "--" : `${Math.round(advice.score)}分`;
   scoreNode.className = advice?.score >= 75 ? "positive-text" : advice?.score >= 60 ? "" : "negative-text";
+  const structureNode = document.querySelector("#backtestStructureSummary");
+  if (structureNode) {
+    const structure = currentReplayCandle() ? recognizeMarketStructure(replayDailyHistory()) : null;
+    structureNode.textContent = structure?.trendDirection
+      ? `${structure.trendDirection} / ${structure.trendStage} / 置信度 ${Math.round(structure.trendConfidence)}`
+      : "--";
+  }
 }
 
 function backtestActionLabel(action) {
@@ -5335,6 +7082,8 @@ function updateBacktestLevelUi() {
 function applyBacktestReplayState(index) {
   const data = backtestState.simulationData;
   if (!data) return;
+  backtestState.serverAdvice = null;
+  backtestState.serverAdviceKey = "";
   const previous = backtestState.previousReplayState || replayState;
   replayState = {
     ...previous,
@@ -5453,7 +7202,7 @@ async function startAiBacktestSetup(button, symbol, startDate, endDate, minBuySc
   }
 }
 
-function executeBacktestCurrentAi() {
+async function executeBacktestCurrentAi() {
   syncBacktestManualLevels();
   if (!backtestState.simulationData) {
     setBacktestStatus("请先开始回测。", "negative");
@@ -5485,7 +7234,8 @@ function executeBacktestCurrentAi() {
       updateBacktestStepControls();
       return;
     }
-    const advice = ruleLibraryAdvice();
+    const advice = await requestBacktestAdvice({ force: true });
+    if (!advice) throw new Error("后端没有返回交易建议");
     if (advice.action === "buy") backtestState.buySignals += 1;
     if (advice.action === "sell") backtestState.sellSignals += 1;
     if (advice.action === "buy" || advice.action === "sell") {
@@ -5668,12 +7418,13 @@ function setView(view) {
     button.classList.toggle("active", isActive);
     button.setAttribute("aria-selected", String(isActive));
   });
-  document.querySelector("#strategyView").classList.toggle("hidden", view === "market" || view === "training" || view === "replay" || view === "backtest" || view === "dataset");
+  document.querySelector("#strategyView").classList.toggle("hidden", view === "market" || view === "training" || view === "replay" || view === "simulation" || view === "simulation-records" || view === "backtest" || view === "dataset");
   document.querySelector("#marketView")?.classList.toggle("hidden", view !== "market");
   document.querySelector("#trainingView").classList.toggle("hidden", view !== "training");
-  document.querySelector("#replayView").classList.toggle("hidden", view !== "replay");
+  document.querySelector("#replayView").classList.toggle("hidden", view !== "replay" && view !== "simulation");
   document.querySelector("#backtestView")?.classList.toggle("hidden", view !== "backtest");
   document.querySelector("#datasetView")?.classList.toggle("hidden", view !== "dataset");
+  document.querySelector("#simulationRecordsView")?.classList.toggle("hidden", view !== "simulation-records");
   if (view === "buy" || view === "sell") {
     activeStrategy = view;
     syncStrategyControls();
@@ -5689,7 +7440,19 @@ function setView(view) {
     startMarketRealtimePolling();
   } else if (view === "replay") {
     output.marketState.textContent = "交易思维训练";
+    updateSimulationUi();
     updateReplayUi();
+    startReplayRealtimePolling();
+  } else if (view === "simulation") {
+    output.marketState.textContent = "模拟交易";
+    replayState.writeTraining = true;
+    replayState.blindMode = false;
+    updateSimulationUi();
+    updateReplayUi();
+    startReplayRealtimePolling();
+  } else if (view === "simulation-records") {
+    output.marketState.textContent = "模拟交易记录";
+    loadSimulationRecords();
   } else if (view === "backtest") {
     output.marketState.textContent = "AI\u5efa\u8bae\u56de\u6d4b";
     setBacktestDefaults();
@@ -6266,6 +8029,8 @@ document.querySelector("#trainingWatchlist")?.addEventListener("click", async (e
 });
 
 document.querySelector("#toggleTrainingWatchlist")?.addEventListener("click", toggleTrainingWatchlist);
+document.querySelector("#refreshTrainingWatchlist")?.addEventListener("click", refreshWatchlistQuotes);
+document.querySelector("#getTrainingWatchlist")?.addEventListener("click", fillWatchlistHistory);
 document.querySelector("#expandTrainingWatchlist")?.addEventListener("click", () => setTrainingWatchlistCollapsed(false));
 document.querySelector("#trainingWatchlist")?.addEventListener("pointerdown", startWatchlistLongPress);
 document.querySelector("#trainingWatchlist")?.addEventListener("pointermove", dragWatchlistItem);
@@ -6384,6 +8149,9 @@ document.querySelector("#backtestDeleteSelectedLevel")?.addEventListener("click"
   syncBacktestManualLevels();
   updateBacktestLevelUi();
 });
+["#replayTrendDirection", "#replayTrendStage", "#replaySupportStatus", "#replaySupportEvidence", "#replayStructure"].forEach((selector) => {
+  document.querySelector(selector)?.addEventListener("change", () => renderRuleAdvice());
+});
 document.querySelector("#copyRuleAdviceSummary")?.addEventListener("click", copyRuleAdviceSummary);
 document.querySelector("#executeRuleAdvice")?.addEventListener("click", executeRuleAdvice);
 document.querySelectorAll(".ai-feedback-button").forEach((button) => {
@@ -6391,6 +8159,14 @@ document.querySelectorAll(".ai-feedback-button").forEach((button) => {
 });
 document.querySelector("#analyzeTimingQuality")?.addEventListener("click", analyzeTimingQuality);
 document.querySelector("#refreshTrainingRecords")?.addEventListener("click", loadTrainingRecords);
+document.querySelector("#refreshSimulationRecords")?.addEventListener("click", loadSimulationRecords);
+document.querySelectorAll(".simulation-record-filter").forEach((button) => {
+  button.addEventListener("click", () => {
+    simulationRecordFilter = button.dataset.simulationFilter || "open";
+    document.querySelectorAll(".simulation-record-filter").forEach((item) => item.classList.toggle("active", item === button));
+    loadSimulationRecords();
+  });
+});
 document.querySelector("#trainingRecordList")?.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
@@ -6465,8 +8241,7 @@ syncStrategyControls();
 loadMarketWatchlist();
 renderMarketWatchlist();
 updateMarketPositionUi();
-syncMarketRealtimeWatchlist();
-startMarketWatchlistSnapshotPolling();
+refreshWatchlistQuotes();
 drawMarketChart();
 setView("replay");
 updateLevelToolUi();

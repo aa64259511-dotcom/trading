@@ -208,6 +208,7 @@ label {
 input[type="text"],
 input[type="number"],
 input[type="date"],
+select,
 textarea {
   width: 100%;
   border: 1px solid var(--line);
@@ -219,7 +220,8 @@ textarea {
 
 input[type="text"],
 input[type="number"],
-input[type="date"] {
+input[type="date"],
+select {
   min-height: 42px;
   padding: 0 11px;
 }
@@ -1423,8 +1425,23 @@ canvas {
 }
 
 .replay-structure-grid {
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: 12px;
+}
+
+.replay-structure-grid .wide-field {
+  grid-column: 1 / -1;
+}
+
+.structure-recognition-summary {
+  padding: 8px 10px;
+  border: 1px dashed rgba(183, 121, 31, 0.55);
+  border-radius: 8px;
+  background: #fff9ee;
+}
+
+.structure-recognition-summary span {
+  color: var(--amber);
 }
 
 .level-reason-grid {
@@ -1659,6 +1676,12 @@ canvas {
 .backtest-advice-card div {
   display: grid;
   gap: 4px;
+}
+
+.backtest-advice-card .backtest-structure-summary {
+  grid-column: 1 / -1;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(183, 121, 31, 0.45);
 }
 
 .backtest-advice-card span {
