@@ -1849,10 +1849,11 @@ function marketBypassFromAdvice(adviceLike) {
     stopLoss: advice.stopLoss,
     stopRiskPct: advice.stopRiskPct,
     pressurePlan: pressurePrice > 0 ? { price: pressurePrice } : advice.pressurePlan,
-  }, bypass, daily);
+  }, bypass, daily, structure);
   return {
     ...structure,
     bypassSupportValidation: bypass,
+    sellTrendBiasNote: sellTrendBiasNote(structure),
     ...gate,
   };
 }
@@ -3187,8 +3188,6 @@ function serializeLevel(level) {
     pathLabel: level.pathLabel || "",
     bypassStatus: level.bypassStatus || "",
     reason: level.reason || "",
-    humanSupportStatus: level.humanSupportStatus || "",
-    humanEvidence: level.humanEvidence || "",
     auto: Boolean(level.auto),
     score: level.score ?? null,
   };
@@ -3210,8 +3209,6 @@ function normalizeStoredLevel(level) {
     price,
     role,
     reason: String(level.reason || ""),
-    humanSupportStatus: level.humanSupportStatus || "",
-    humanEvidence: level.humanEvidence || "",
     validationStatus: level.validationStatus || "",
     validationReason: String(level.validationReason || level.supportValidationReason || ""),
     supportValidationReason: String(level.supportValidationReason || level.validationReason || ""),
@@ -3262,34 +3259,6 @@ function saveReplayLevels() {
   }
 }
 
-function humanSupportPath(evidence) {
-  const table = {
-    "急跌修复": ["fast_drop_repair", "急跌修复"],
-    "跌破后回踩确认": ["reclaim_retest_bullish", "跌破后回踩确认"],
-    "多次回踩反弹": ["reclaim_retest_bullish", "多次回踩反弹"],
-    "假跌破后收回": ["reclaim_retest_bullish", "假跌破后收回"],
-    "底部形态": ["bottom_pattern", "底部形态"],
-    "头肩底": ["bottom_pattern", "底部形态"],
-    "平台突破回踩": ["platform_break_retest", "平台突破回踩"],
-    "突破回踩": ["platform_break_retest", "平台突破回踩"],
-    "人工结构判断": ["", "人工结构判断"],
-  };
-  const hit = table[String(evidence || "").trim()];
-  if (hit) return { pathId: hit[0], pathLabel: hit[1] };
-  const text = String(evidence || "").trim();
-  return text ? { pathId: "", pathLabel: text } : { pathId: "", pathLabel: "" };
-}
-
-function bottomHumanSupportFields() {
-  if (typeof document === "undefined") {
-    return { status: "", evidence: "", pathId: "", pathLabel: "" };
-  }
-  const status = document.querySelector("#replaySupportStatus")?.value || "";
-  const evidence = document.querySelector("#replaySupportEvidence")?.value || "";
-  const path = humanSupportPath(evidence);
-  return { status, evidence, pathId: path.pathId, pathLabel: path.pathLabel };
-}
-
 function recordLevelCorrection(action, level, detail = {}) {
   const candle = currentReplayCandle();
   if (!candle || !level) return;
@@ -3305,45 +3274,9 @@ function recordLevelCorrection(action, level, detail = {}) {
     fromPrice: detail.fromPrice ?? null,
     toPrice: detail.toPrice ?? level.price ?? null,
     reason: detail.reason ?? level.reason ?? "",
-    validationStatus: detail.validationStatus ?? "",
-    pathId: detail.pathId ?? "",
-    pathLabel: detail.pathLabel ?? "",
-    humanSupportStatus: detail.humanSupportStatus ?? "",
-    humanEvidence: detail.humanEvidence ?? "",
     sourceAuto: Boolean(level.auto),
     recordedAt: new Date().toISOString(),
   });
-}
-
-function recordBottomSelectLevelCorrection() {
-  const candle = currentReplayCandle();
-  if (!candle) return;
-  const level = selectedManualLevel() || nearestManualLevels().support;
-  if (!level) return;
-  const human = bottomHumanSupportFields();
-  const last = (replayState.levelCorrections || []).at(-1);
-  if (
-    last
-    && last.action === "bottom_select"
-    && last.levelId === level.id
-    && last.date === candle.date
-    && last.humanSupportStatus === human.status
-    && last.humanEvidence === human.evidence
-  ) return;
-  level.humanSupportStatus = human.status;
-  level.humanEvidence = human.evidence;
-  recordLevelCorrection("bottom_select", level, {
-    toPrice: level.price,
-    reason: human.evidence || human.status || "跟随系统",
-    side: levelTrainingSide(level),
-    validationStatus: human.status,
-    pathId: human.pathId,
-    pathLabel: human.pathLabel,
-    humanSupportStatus: human.status,
-    humanEvidence: human.evidence,
-  });
-  saveReplayLevels();
-  updateLevelTrainingUi();
 }
 
 function updateLevelTrainingUi() {
@@ -3355,31 +3288,27 @@ function updateLevelTrainingUi() {
 
 function buildLevelTrainingPayload() {
   const nearest = nearestManualLevels();
-  const human = bottomHumanSupportFields();
-  const support = nearest.support;
+  const history = replayDailyHistory();
+  const structure = history.length ? recognizeMarketStructure(history) : null;
   return {
     ...levelTrainingContext(),
     autoSnapshot: replayState.autoLevelSnapshot,
     corrections: replayState.levelCorrections || [],
     acceptedLevels: {
-      support: serializeLevel(support),
+      support: serializeLevel(nearest.support),
       resistance: serializeLevel(nearest.resistance),
     },
     allLevels: (replayState.manualLevels || []).map(serializeLevel),
-    validationStatus: human.status,
-    pathId: human.pathId,
-    pathLabel: human.pathLabel,
-    humanSupportStatus: human.status,
-    humanEvidence: human.evidence,
-    humanValidationReason: human.evidence,
-    supportPath: (support || human.status || human.evidence) ? {
-      validationStatus: human.status || support?.humanSupportStatus || support?.bypassStatus || support?.validationStatus || "",
-      pathId: human.pathId || support?.pathId || "",
-      pathLabel: human.pathLabel || support?.pathLabel || "",
-      validationReason: human.evidence || support?.humanEvidence || support?.validationReason || support?.supportValidationReason || "",
-      humanSupportStatus: human.status,
-      humanEvidence: human.evidence,
-      humanValidationReason: human.evidence,
+    weeklyTrend: structure ? {
+      weeklyTrendDirection: structure.weeklyTrendDirection || "",
+      weeklyTrendStage: structure.weeklyTrendStage || "",
+      weeklyTrendStrength: structure.weeklyTrendStrength || "",
+      turnCount: structure.turnCount ?? null,
+    } : null,
+    supportPath: nearest.support ? {
+      validationStatus: nearest.support.bypassStatus || nearest.support.validationStatus || "",
+      pathId: nearest.support.pathId || "",
+      validationReason: nearest.support.validationReason || nearest.support.supportValidationReason || "",
     } : null,
   };
 }
@@ -3393,12 +3322,10 @@ async function saveLevelTrainingSample() {
     setStatus("#replayStatus", "请先点击周线自动画线，生成自动线快照。", "negative");
     return;
   }
-  const acceptedAutoLevel = (replayState.manualLevels || []).some((level) => level.auto && Number(level.price) > 0);
-  if (!(replayState.levelCorrections || []).length && !acceptedAutoLevel) {
-    setStatus("#replayStatus", "当前没有人工修正动作，也没有已接受的自动线，暂不保存画线训练样本。", "negative");
+  if (!(replayState.levelCorrections || []).length) {
+    setStatus("#replayStatus", "当前没有人工修正动作，暂不保存画线训练样本。", "negative");
     return;
   }
-  const acceptingAutoLevels = !(replayState.levelCorrections || []).length;
   const payload = buildLevelTrainingPayload();
   const response = await fetch(apiUrl("/api/level-training-sample"), {
     method: "POST",
@@ -3412,7 +3339,7 @@ async function saveLevelTrainingSample() {
   }
   replayState.levelCorrections = [];
   updateLevelTrainingUi();
-  setStatus("#replayStatus", acceptingAutoLevels ? "已保存画线训练样本（接受当前自动线）。" : "已保存画线训练样本，可用于拟合周线自动画线准确度。", "positive");
+  setStatus("#replayStatus", "已保存画线训练样本，可用于拟合周线自动画线准确度。", "positive");
 }
 
 function syncManualLevelInputs() {
@@ -4320,7 +4247,7 @@ function zoomReplayChart(direction) {
 function replayDailyHistory() {
   const daily = replayState.data?.timeframes?.daily || [];
   if (!daily.length) return [];
-  return daily.slice(0, replayState.cursor + 1).slice(-700);
+  return daily.slice(0, replayState.cursor + 1);
 }
 
 function average(items, selector) {
@@ -5163,6 +5090,311 @@ function ruleLibraryAdvice() {
   };
 }
 
+function evaluateWeeklyTrendStructure(dailyBars = []) {
+  const bars = (Array.isArray(dailyBars) ? dailyBars : []).filter((bar) => {
+    return bar && Number(bar.close) > 0 && Number(bar.high) > 0 && Number(bar.low) > 0;
+  });
+  const asOfDate = bars.at(-1)?.date || "";
+  const emptyZones = { support: null, resistance: null, spanPct: null, supportPrice: null, resistancePrice: null };
+  const blank = (basis, stage = "周线不足") => ({
+    weeklyTrendDirection: "",
+    weeklyTrendStage: stage,
+    weeklyTrendStrength: "",
+    weeklyTrendBasis: basis,
+    zones: emptyZones,
+    turnCount: 0,
+    participatesInScoring: false,
+    asOfDate,
+  });
+  if (bars.length < 20) {
+    return blank("可用K线不足，周线方向和阶段未判定。该结果不参与评分。");
+  }
+  const weeks = dailyToWeeklyCandles(bars).filter((week) => week && week.date && (!asOfDate || week.date <= asOfDate));
+  if (weeks.length < 8) {
+    return blank(`截至 ${asOfDate || "--"} 只有 ${weeks.length} 根已收盘周线，周线结构随分析日更新，当前不足以判定。不参与评分。`);
+  }
+
+  function meanOf(items, selector) {
+    return average(items, selector);
+  }
+
+  function swingsOf(series, windowSize) {
+    const points = [];
+    if (series.length < windowSize * 2 + 1) return points;
+    for (let index = windowSize; index < series.length - windowSize; index += 1) {
+      const slice = series.slice(index - windowSize, index + windowSize + 1);
+      const bar = series[index];
+      const high = Math.max(...slice.map((item) => Number(item.high)));
+      const low = Math.min(...slice.map((item) => Number(item.low)));
+      if (Number(bar.high) >= high) {
+        points.push({ price: Number(bar.high), date: bar.date || "", index, kind: "swing_high" });
+      }
+      if (Number(bar.low) <= low) {
+        points.push({ price: Number(bar.low), date: bar.date || "", index, kind: "swing_low" });
+      }
+    }
+    return points;
+  }
+
+  function cluster(points) {
+    const sorted = points.filter((point) => point.price > 0).sort((a, b) => a.price - b.price || a.index - b.index);
+    const clusters = [];
+    sorted.forEach((point) => {
+      const last = clusters.at(-1);
+      if (last && Math.abs(point.price - last.price) / last.price <= 0.03) {
+        last.points.push(point);
+        last.price = meanOf(last.points, (item) => item.price);
+        last.lastIndex = Math.max(last.lastIndex, point.index);
+        last.firstIndex = Math.min(last.firstIndex, point.index);
+      } else {
+        clusters.push({ price: point.price, points: [point], lastIndex: point.index, firstIndex: point.index });
+      }
+    });
+    return clusters;
+  }
+
+  function asZone(cluster) {
+    if (!cluster) return null;
+    return {
+      price: Number(cluster.price.toFixed(4)),
+      touches: cluster.points.length,
+      validated: cluster.points.length >= 2,
+      lastDate: weeks[cluster.lastIndex]?.date || "",
+      firstDate: weeks[cluster.firstIndex]?.date || "",
+      zoneLow: Number((cluster.price * 0.985).toFixed(4)),
+      zoneHigh: Number((cluster.price * 1.015).toFixed(4)),
+    };
+  }
+
+  const close = Number(weeks.at(-1).close);
+  const swings = swingsOf(weeks, 2);
+  const highs = swings.filter((point) => point.kind === "swing_high");
+  const lows = swings.filter((point) => point.kind === "swing_low");
+  const highClusters = cluster(highs);
+  const lowClusters = cluster(lows);
+
+  function pickCluster(clusters, side) {
+    if (!clusters.length) return null;
+    const validated = clusters.filter((item) => item.points.length >= 2);
+    const pool = validated.length ? validated : clusters;
+    const sided = side === "support"
+      ? pool.filter((item) => item.price <= close * 1.03)
+      : pool.filter((item) => item.price >= close * 0.97);
+    const list = (sided.length ? sided : pool).slice().sort((a, b) => {
+      const distance = Math.abs(a.price - close) - Math.abs(b.price - close);
+      if (distance) return distance;
+      return b.points.length - a.points.length || b.lastIndex - a.lastIndex;
+    });
+    return list[0] || null;
+  }
+
+  let supportCluster = pickCluster(lowClusters, "support");
+  let resistanceCluster = pickCluster(highClusters, "resistance");
+  if (supportCluster && resistanceCluster && supportCluster.price >= resistanceCluster.price) {
+    supportCluster = lowClusters.filter((item) => item.price < close).sort((a, b) => b.price - a.price)[0] || null;
+    resistanceCluster = highClusters.filter((item) => item.price > close).sort((a, b) => a.price - b.price)[0] || null;
+  }
+  const supportZone = asZone(supportCluster);
+  const resistanceZone = asZone(resistanceCluster);
+  const supportPrice = supportZone?.price || (lows.length ? lows.at(-1).price : null);
+  const resistancePrice = resistanceZone?.price || (highs.length ? highs.at(-1).price : null);
+  const spanPct = supportPrice > 0 && resistancePrice > supportPrice
+    ? ((resistancePrice - supportPrice) / supportPrice) * 100
+    : null;
+  const clampPct = (span, ratio, minPct, maxPct) => {
+    if (!(span > 0)) return minPct;
+    return Math.max(minPct, Math.min(maxPct, span * ratio));
+  };
+  const nearPct = spanPct == null ? 3 : clampPct(spanPct, 0.2, 3, 8);
+  const overshootPct = spanPct == null ? 1.5 : clampPct(spanPct, 0.1, 1.5, 5);
+  const spanOk = spanPct != null && spanPct >= 8 && spanPct <= 50;
+  const nearUpper = (price) => {
+    if (!(resistancePrice > 0)) return false;
+    return price >= resistancePrice * (1 - nearPct / 100) && price <= resistancePrice * (1 + overshootPct / 100);
+  };
+  const nearLower = (price) => {
+    if (!(supportPrice > 0)) return false;
+    return price <= supportPrice * (1 + nearPct / 100) && price >= supportPrice * (1 - overshootPct / 100);
+  };
+  const turns = [];
+  swings.slice().sort((a, b) => a.index - b.index || (a.kind === "swing_low" ? -1 : 1)).forEach((point) => {
+    const side = point.kind === "swing_high" && nearUpper(point.price)
+      ? "upper"
+      : point.kind === "swing_low" && nearLower(point.price)
+        ? "lower"
+        : "";
+    if (!side) return;
+    const last = turns.at(-1);
+    if (last && last.side === side) {
+      const better = side === "upper" ? point.price >= last.price : point.price <= last.price;
+      if (better) turns[turns.length - 1] = { ...point, side };
+      return;
+    }
+    turns.push({ ...point, side });
+  });
+  const turnCount = turns.length;
+  const breakGap = supportPrice > 0 && resistancePrice > supportPrice ? (resistancePrice - supportPrice) * 0.15 : 0;
+  const lastTwo = weeks.slice(-2);
+  const heldUpBreak = Boolean(breakGap > 0 && lastTwo.length >= 2 && lastTwo.every((week) => Number(week.close) > resistancePrice + breakGap));
+  const heldDownBreak = Boolean(breakGap > 0 && lastTwo.length >= 2 && lastTwo.every((week) => Number(week.close) < supportPrice - breakGap));
+  const recentCutoff = Math.max(0, weeks.length - 20);
+  const recentHighs = highs.filter((point) => point.index >= recentCutoff);
+  const recentLows = lows.filter((point) => point.index >= recentCutoff);
+  const lastHighs = (recentHighs.length >= 2 ? recentHighs : highs).slice(-2);
+  const lastLows = (recentLows.length >= 2 ? recentLows : lows).slice(-2);
+  const swingsAreRecent = recentHighs.length >= 2 && recentLows.length >= 2;
+  const higherHighs = swingsAreRecent && lastHighs.length >= 2 && lastHighs[1].price > lastHighs[0].price * 1.01;
+  const higherLows = swingsAreRecent && lastLows.length >= 2 && lastLows[1].price > lastLows[0].price * 1.01;
+  const lowerHighs = swingsAreRecent && lastHighs.length >= 2 && lastHighs[1].price < lastHighs[0].price * 0.99;
+  const lowerLows = swingsAreRecent && lastLows.length >= 2 && lastLows[1].price < lastLows[0].price * 0.99;
+  const earlierClose = Number(weeks[Math.max(0, weeks.length - 13)]?.close || 0);
+  const middleClose = Number(weeks[Math.max(0, weeks.length - 7)]?.close || 0);
+  const latestClose = Number(weeks.at(-1)?.close || 0);
+  let closeSequence = "";
+  if (earlierClose > 0 && middleClose > earlierClose * 1.03 && latestClose > middleClose * 1.03) closeSequence = "上涨";
+  else if (earlierClose > 0 && middleClose < earlierClose * 0.97 && latestClose < middleClose * 0.97) closeSequence = "下跌";
+  else if (earlierClose > 0 && latestClose > earlierClose * 1.12 && latestClose >= middleClose) closeSequence = "上涨";
+  else if (earlierClose > 0 && latestClose < earlierClose * 0.88 && latestClose <= middleClose) closeSequence = "下跌";
+  const zoneStart = Math.min(
+    supportCluster ? supportCluster.firstIndex : weeks.length - 1,
+    resistanceCluster ? resistanceCluster.firstIndex : weeks.length - 1,
+  );
+  const priorIndex = Math.max(0, zoneStart - 15);
+  const priorClose = Number(weeks[priorIndex]?.close || 0);
+  const entryClose = Number(weeks[Math.max(0, zoneStart)]?.close || close);
+  const priorChange = priorClose > 0 ? (entryClose - priorClose) / priorClose : 0;
+  let priorTrend = "";
+  if (priorChange >= 0.08) priorTrend = "上涨";
+  else if (priorChange <= -0.08) priorTrend = "下跌";
+  const contextTag = priorTrend === "上涨" ? "高位盘整" : priorTrend === "下跌" ? "低位盘整" : "";
+
+  let direction = "盘整";
+  let decision = "高低点与突破都不明确，先按盘整。";
+  if (spanOk && turnCount >= 3) {
+    direction = "盘整";
+    decision = `先看区间：上下拐头 ${turnCount} 次，跨度 ${spanPct.toFixed(1)}% 在 8% 到 50% 之间，判为盘整${contextTag ? `，进区间前为${contextTag}` : ""}。`;
+  } else if (heldUpBreak && !heldDownBreak) {
+    direction = "上涨";
+    decision = `周收盘连续 2 周高出压力 ${Number(resistancePrice).toFixed(2)}，超出幅度达到区间跨度的 15%，有效突破，直接判为上涨。`;
+  } else if (heldDownBreak && !heldUpBreak) {
+    direction = "下跌";
+    decision = `周收盘连续 2 周低于支撑 ${Number(supportPrice).toFixed(2)}，超出幅度达到区间跨度的 15%，有效跌破，直接判为下跌。`;
+  } else if (higherHighs && higherLows) {
+    direction = "上涨";
+    decision = "拐头次数不够盘整，近端周线高点和低点同时抬高，判为上涨。";
+  } else if (lowerHighs && lowerLows) {
+    direction = "下跌";
+    decision = "拐头次数不够盘整，近端周线高点和低点同时降低，判为下跌。";
+  } else if (closeSequence) {
+    direction = closeSequence;
+    decision = `近期周线收盘序列转为${closeSequence}，高低点尚未凑够两组，按最近价格行为更新方向。`;
+  } else if (turnCount < 3 && priorTrend) {
+    direction = priorTrend;
+    decision = `拐头只有 ${turnCount} 次，不足以判盘整，参考进入当前区间前 15 周，此前为${priorTrend}。`;
+  } else if (spanPct != null && spanPct < 8) {
+    direction = "盘整";
+    decision = `支撑与压力跨度 ${spanPct.toFixed(1)}% 低于 8%，属于窄幅横盘，不按区间盘整交易，方向标为盘整。`;
+  } else if (spanPct != null && spanPct > 50) {
+    decision = `支撑与压力跨度 ${spanPct.toFixed(1)}% 高于 50%，属于大级别波段，不把整段当成一个盘整区间。`;
+    if (higherHighs && higherLows) {
+      direction = "上涨";
+      decision += "近期高低点抬高，判为上涨。";
+    } else if (lowerHighs && lowerLows) {
+      direction = "下跌";
+      decision += "近期高低点降低，判为下跌。";
+    } else if (priorTrend) {
+      direction = priorTrend;
+      decision += `参考进区间前走势，判为${priorTrend}。`;
+    }
+  }
+
+  const weeklyMa10 = weeks.length >= 10 ? meanOf(weeks.slice(-10), (item) => Number(item.close)) : close;
+  const weeklyMa30 = weeks.length >= 30 ? meanOf(weeks.slice(-30), (item) => Number(item.close)) : weeklyMa10;
+  const weeklyMa10Prev = weeks.length >= 15 ? meanOf(weeks.slice(-15, -5), (item) => Number(item.close)) : weeklyMa10;
+  const ma10Rising = weeklyMa10Prev > 0 && weeklyMa10 > weeklyMa10Prev * 1.002;
+  const ma10Falling = weeklyMa10Prev > 0 && weeklyMa10 < weeklyMa10Prev * 0.998;
+  const maAgreesUp = close >= weeklyMa10 && weeklyMa10 >= weeklyMa30 * 0.998;
+  const maAgreesDown = close <= weeklyMa10 && weeklyMa10 <= weeklyMa30 * 1.002;
+  let waveNote = "";
+  if (highs.length && lows.length) {
+    const lastHigh = highs.at(-1);
+    const prevLow = [...lows].reverse().find((point) => point.index < lastHigh.index);
+    const lastLow = lows.at(-1);
+    const prevHigh = [...highs].reverse().find((point) => point.index < lastLow.index);
+    const rally = prevLow ? (lastHigh.price - prevLow.price) / prevLow.price : 0;
+    const pullback = prevHigh && lastLow.index > prevHigh.index ? (prevHigh.price - lastLow.price) / prevHigh.price : 0;
+    if (direction === "上涨" && pullback > rally && pullback > 0.03) waveNote = "最近回调波段不短于上涨波段，强度下调。";
+    if (direction === "下跌" && rally > Math.max(pullback, 0) && rally > 0.03) waveNote = "最近反弹波段不弱于下跌波段，强度下调。";
+  }
+  let strength = "盘整";
+  if (direction === "上涨") {
+    strength = maAgreesUp && ma10Rising && !waveNote ? "强上涨" : "弱上涨";
+    if (!maAgreesUp) waveNote = `${waveNote}结构与周线均线不一致，以结构为准，标为弱上涨。`.trim();
+  } else if (direction === "下跌") {
+    strength = maAgreesDown && ma10Falling && !waveNote ? "强下跌" : "弱下跌";
+    if (!maAgreesDown) waveNote = `${waveNote}结构与周线均线不一致，以结构为准，标为弱下跌。`.trim();
+  }
+
+  const dailyClose = Number(bars.at(-1).close);
+  const ma20 = meanOf(bars.slice(-Math.min(20, bars.length)), (item) => Number(item.close));
+  const ma60 = meanOf(bars.slice(-Math.min(60, bars.length)), (item) => Number(item.close));
+  const ma120 = meanOf(bars.slice(-Math.min(120, bars.length)), (item) => Number(item.close));
+  const high60 = Math.max(...bars.slice(-Math.min(60, bars.length)).map((item) => Number(item.high)));
+  const high120 = Math.max(...bars.slice(-Math.min(120, bars.length)).map((item) => Number(item.high)));
+  const low20 = Math.min(...bars.slice(-Math.min(20, bars.length)).map((item) => Number(item.low)));
+  const dropFromHigh60 = high60 > 0 ? (high60 - dailyClose) / high60 : 0;
+  const drawdown120 = high120 > 0 ? (high120 - dailyClose) / high120 : 0;
+  const fastDrop = high60 > 0 && (high60 - low20) / high60 >= 0.18;
+  const prevBar = bars.at(-2);
+  const twoUp = Boolean(
+    prevBar
+    && dailyClose > Number(prevBar.close)
+    && dailyClose > Number(bars.at(-1).open)
+    && Number(prevBar.close) > Number(prevBar.open)
+  );
+  const repairing = dailyClose > ma20 || twoUp;
+  let stage = "盘整结构，等待区间边界确认";
+  if (direction === "上涨") {
+    if (fastDrop && repairing) stage = "急跌后修复观察";
+    else if (dropFromHigh60 >= 0.12) stage = "上升趋势中的大调整，等待踩稳确认";
+    else stage = "上升趋势回调/延续观察";
+  } else if (direction === "下跌") {
+    const longPressure = dailyClose < ma60 || dailyClose < ma120;
+    if (fastDrop && repairing) stage = "急跌后修复观察";
+    else if (longPressure && drawdown120 >= 0.2 && repairing) stage = "长期下跌后尝试趋势扭转";
+    else stage = "弱势结构，只做反弹模型";
+  }
+
+  const supportText = supportPrice ? `周线支撑区 ${Number(supportPrice).toFixed(2)}${supportZone?.validated ? "，触碰至少2次" : ""}` : "周线支撑区不足";
+  const resistanceText = resistancePrice ? `周线压力区 ${Number(resistancePrice).toFixed(2)}${resistanceZone?.validated ? "，触碰至少2次" : ""}` : "周线压力区不足";
+  const spanText = spanPct == null ? "跨度不足" : `跨度 ${spanPct.toFixed(1)}%`;
+  const basis = [
+    `截至 ${asOfDate || "--"} 已收盘周线 ${weeks.length} 根，方向和阶段按当时可见周线重算。`,
+    `${supportText}；${resistanceText}；${spanText}；边界附近拐头 ${turnCount} 次。`,
+    decision,
+    `强弱 ${strength}。${waveNote}`,
+    `子阶段 ${stage}。`,
+    "周线结构不参与买卖评分。",
+  ].filter(Boolean).join("");
+
+  return {
+    weeklyTrendDirection: direction,
+    weeklyTrendStage: stage,
+    weeklyTrendStrength: strength,
+    weeklyTrendBasis: basis,
+    zones: {
+      support: supportZone,
+      resistance: resistanceZone,
+      spanPct: spanPct == null ? null : Number(spanPct.toFixed(2)),
+      supportPrice: supportPrice == null ? null : Number(Number(supportPrice).toFixed(4)),
+      resistancePrice: resistancePrice == null ? null : Number(Number(resistancePrice).toFixed(4)),
+    },
+    turnCount,
+    participatesInScoring: false,
+    asOfDate,
+  };
+}
+
 function evaluateSupportPathValidation(history = [], price, meta = {}) {
   const levelPrice = Number(price);
   const bars = (Array.isArray(history) ? history : []).filter((bar) => bar && Number(bar.close) > 0 && Number(bar.high) > 0 && Number(bar.low) > 0);
@@ -5353,9 +5585,31 @@ function evaluateSupportPathValidation(history = [], price, meta = {}) {
   };
 }
 
-function buildBypassBuyGate(advice, validation, history) {
+function sellTrendBiasNote(structure = {}) {
+  const direction = structure.weeklyTrendDirection || "";
+  const span = structure.zones?.spanPct;
+  if (direction === "下跌") {
+    return "卖出偏好（只展示，不改卖出逻辑）：此前为下跌趋势，打到压力时卖出评分提高；反弹遇压优先兑现，不必等趋势破坏。";
+  }
+  if (direction === "上涨") {
+    return "卖出偏好（只展示，不改卖出逻辑）：此前为上涨趋势，不宜仅因接近压力就高分卖出。更好卖点是上涨加速后动能衰竭，或跌破上涨趋势后再卖。";
+  }
+  if (direction === "盘整") {
+    const spanText = span == null ? "跨度约20%（限定在2%到6%）" : `跨度 ${Number(span).toFixed(1)}% 的20%（限定在2%到6%）`;
+    return `卖出偏好（只展示，不改卖出逻辑）：打到区间上沿时卖出评分提高。向上快速突破后，若收盘重新落到上沿下方达到${spanText}，视为假突破并提高卖出评分；站稳区间外且回踩不破上沿，则转入上涨，不因离开上沿单独高分卖出。`;
+  }
+  return "卖出偏好（只展示，不改卖出逻辑）：周线结构尚不足，不调节卖出评分。";
+}
+
+function buildBypassBuyGate(advice, validation, history, structure) {
+  const weeklyDirection = structure?.weeklyTrendDirection || "";
   const label = validation?.label || "待验证";
   const reason = String(validation?.validationReason || validation?.supportValidationReason || "").trim();
+  const weeklyNote = weeklyDirection === "下跌"
+    ? "周线下跌时只按反弹试错，不按趋势仓。"
+    : (weeklyDirection === "上涨" || weeklyDirection === "盘整")
+      ? "周线盘整或上涨时，真实支撑加上盈亏比即可作为旁路依据。"
+      : "";
   const result = {
     bypassBuyEligible: false,
     bypassBuyReason: "",
@@ -5364,7 +5618,7 @@ function buildBypassBuyGate(advice, validation, history) {
     bypassParticipatesInScoring: false,
   };
   if (!validation || validation.status !== "validated") {
-    result.bypassBuyReason = `支撑验证状态：${label}。${reason || "尚未升为真实支撑。"} 旁路买入资格未开启，原买入评分不变。`.trim();
+    result.bypassBuyReason = `支撑验证状态：${label}。${reason || "尚未升为真实支撑。"} 旁路买入资格未开启，原买入评分不变。${weeklyNote}`.trim();
     return result;
   }
   if (!reason) {
@@ -5393,8 +5647,8 @@ function buildBypassBuyGate(advice, validation, history) {
   const rewardText = riskReward == null ? "缺少上方压力，未计算盈亏比" : `盈亏比 ${riskReward.toFixed(2)}`;
   const stopText = stopPct == null ? "缺少止损" : `止损空间 ${(stopPct * 100).toFixed(2)}%`;
   result.bypassBuyReason = result.bypassBuyEligible
-    ? `支撑验证状态：真实支撑。验证原因：${reason} 旁路买入只看${rewardText}（需至少3）和${stopText}（约3%到8%），当前满足。不替换原买入模型评分。`.trim()
-    : `支撑验证状态：真实支撑。验证原因：${reason} 旁路买入未通过：${rewardText}，${stopText}。需要盈亏比至少3且止损约3%到8%。原买入评分不变。`.trim();
+    ? `支撑验证状态：真实支撑。验证原因：${reason} 旁路买入只看${rewardText}（需至少3）和${stopText}（约3%到8%），当前满足。不替换原买入模型评分。${weeklyNote}`.trim()
+    : `支撑验证状态：真实支撑。验证原因：${reason} 旁路买入未通过：${rewardText}，${stopText}。需要盈亏比至少3且止损约3%到8%。原买入评分不变。${weeklyNote}`.trim();
   return result;
 }
 
@@ -5438,6 +5692,7 @@ function recognizeMarketStructure(history = []) {
     asOfDate,
     participatesInScoring: false,
   });
+  const weeklyTrend = evaluateWeeklyTrendStructure(bars);
   if (bars.length < 20) {
     const emptySupport = blankValidation("support");
     return {
@@ -5460,6 +5715,8 @@ function recognizeMarketStructure(history = []) {
         participatesInScoring: false,
         asOfDate,
       },
+      ...weeklyTrend,
+      sellTrendBiasNote: sellTrendBiasNote(weeklyTrend),
       asOfDate,
       lookbackBars: bars.length,
       participatesInScoring: false,
@@ -6040,6 +6297,8 @@ function recognizeMarketStructure(history = []) {
     supportValidation,
     resistanceValidation,
     bypassSupportValidation,
+    ...weeklyTrend,
+    sellTrendBiasNote: sellTrendBiasNote(weeklyTrend),
     asOfDate,
     lookbackBars: bars.length,
     participatesInScoring: false,
@@ -6063,7 +6322,7 @@ function attachStructureRecognition(advice, history) {
   const bypassSupportValidation = manualPrice
     ? evaluateSupportPathValidation(history, manualPrice, { source: "manual" })
     : structure.bypassSupportValidation;
-  const gate = buildBypassBuyGate(advice, bypassSupportValidation, history);
+  const gate = buildBypassBuyGate(advice, bypassSupportValidation, history, structure);
   if (!advice || typeof advice !== "object") return advice;
   return {
     ...advice,
@@ -6075,6 +6334,13 @@ function attachStructureRecognition(advice, history) {
     supportValidation: structure.supportValidation,
     resistanceValidation: structure.resistanceValidation,
     bypassSupportValidation,
+    weeklyTrendDirection: structure.weeklyTrendDirection,
+    weeklyTrendStage: structure.weeklyTrendStage,
+    weeklyTrendStrength: structure.weeklyTrendStrength,
+    weeklyTrendBasis: structure.weeklyTrendBasis,
+    zones: structure.zones,
+    turnCount: structure.turnCount,
+    sellTrendBiasNote: structure.sellTrendBiasNote,
     bypassBuyEligible: gate.bypassBuyEligible,
     bypassBuyReason: gate.bypassBuyReason,
     bypassRiskReward: gate.bypassRiskReward,
@@ -6104,6 +6370,14 @@ function adviceHasStructureRecognition(advice) {
   return Boolean(advice && (advice.supportValidation || advice.resistanceValidation || advice.trendConfidence != null));
 }
 
+function weeklyZoneText(zones) {
+  if (!zones) return "未形成";
+  const support = zones.supportPrice != null ? formatPrice(zones.supportPrice) : "--";
+  const resistance = zones.resistancePrice != null ? formatPrice(zones.resistancePrice) : "--";
+  const span = zones.spanPct != null && zones.spanPct !== "" ? `${Number(zones.spanPct).toFixed(1)}%` : "--";
+  return `支撑 ${support} / 压力 ${resistance} / 跨度 ${span}`;
+}
+
 function supportValidationView(advice) {
   const bypass = advice?.bypassSupportValidation;
   if (bypass && (bypass.validationReason || bypass.supportValidationReason || bypass.status)) {
@@ -6124,7 +6398,7 @@ function supportValidationView(advice) {
 }
 
 function structureRecognitionSummaryLines(advice) {
-  if (!adviceHasStructureRecognition(advice)) return [];
+  if (!adviceHasStructureRecognition(advice) && !advice?.weeklyTrendDirection && !advice?.weeklyTrendBasis) return [];
   const confidence = advice.trendConfidence == null || advice.trendConfidence === ""
     ? "--"
     : `${Math.round(Number(advice.trendConfidence))}`;
@@ -6138,9 +6412,17 @@ function structureRecognitionSummaryLines(advice) {
     `压力候选：${structureCandidateText(advice.resistanceCandidates)}`,
     `支撑验证：${structureStatusText(advice.supportValidation)}`,
     `压力验证：${structureStatusText(advice.resistanceValidation)}`,
+    "周线结构（不参与评分）",
+    `周线方向：${advice.weeklyTrendDirection || "--"}`,
+    `周线阶段：${advice.weeklyTrendStage || "--"}`,
+    `周线强弱：${advice.weeklyTrendStrength || "--"}`,
+    `拐头次数：${advice.turnCount ?? "--"}`,
+    `周线区间：${weeklyZoneText(advice.zones)}`,
+    `周线依据：${advice.weeklyTrendBasis || "--"}`,
     `支撑验证状态：${supportView.statusText}`,
     `验证原因：${supportView.reason || "--"}`,
     advice.bypassBuyReason ? `旁路买入：${advice.bypassBuyEligible ? "满足盈亏比和止损" : "未开启"}。${advice.bypassBuyReason}` : "",
+    advice.sellTrendBiasNote || "",
   ].filter(Boolean);
 }
 
@@ -6159,8 +6441,24 @@ function humanStructureSelections() {
 
 function structureCompareNotes(advice, human = humanStructureSelections()) {
   const gaps = [];
+  const weeklyDirection = advice?.weeklyTrendDirection || "";
+  if (human.humanDirection && ["上涨", "下跌", "盘整"].includes(human.humanDirection) && weeklyDirection && human.humanDirection !== weeklyDirection) {
+    gaps.push(`周线方向 ${weeklyDirection} 与人工 ${human.humanDirection} 不一致`);
+  }
   if (human.humanDirection && advice?.trendDirection && human.humanDirection !== advice.trendDirection) gaps.push("日线方向与人工不一致");
-  if (human.humanStage && advice?.trendStage && human.humanStage !== advice.trendStage) gaps.push("阶段与人工不一致");
+  const weeklyStages = [
+    "上升趋势回调/延续观察",
+    "上升趋势中的大调整，等待踩稳确认",
+    "长期下跌后尝试趋势扭转",
+    "弱势结构，只做反弹模型",
+    "急跌后修复观察",
+    "盘整结构，等待区间边界确认",
+  ];
+  if (human.humanStage && advice?.weeklyTrendStage && weeklyStages.includes(human.humanStage) && human.humanStage !== advice.weeklyTrendStage) {
+    gaps.push("周线阶段与人工不一致");
+  } else if (human.humanStage && advice?.trendStage && !weeklyStages.includes(human.humanStage) && human.humanStage !== advice.trendStage) {
+    gaps.push("阶段与人工不一致");
+  }
   const supportView = supportValidationView(advice);
   const supportAlign = {
     "候选": "待验证",
@@ -6170,8 +6468,6 @@ function structureCompareNotes(advice, human = humanStructureSelections()) {
     "真实支撑": "真实支撑",
     "已失效": "失效",
     "失效": "失效",
-    "跌破后收回": "跌破后收回",
-    "已过期": "已过期",
   };
   const humanSupportKey = supportAlign[human.humanSupport] || "";
   if (humanSupportKey && supportView.statusText && humanSupportKey !== supportView.statusText) gaps.push("支撑验证状态与人工不一致");
@@ -6193,15 +6489,28 @@ function bypassStructureSectionHtml(advice, { includeHuman = false } = {}) {
   const supportView = supportValidationView(advice);
   const human = includeHuman ? humanStructureSelections() : null;
   const gaps = includeHuman
-    ? structureCompareNotes(advice, human).filter((item) => item.startsWith("支撑") || item.startsWith("验证"))
+    ? structureCompareNotes(advice, human).filter((item) => item.startsWith("周线") || item.startsWith("支撑") || item.startsWith("验证"))
     : [];
   const eligibleText = advice.bypassBuyEligible ? "旁路资格：盈亏比和止损已满足（不改原评分）" : "旁路资格：未替换原买入评分";
   return `
-    <div class="rule-advice-section" data-structure-layer="support-bypass">
+    <div class="rule-advice-section structure-recognition-summary" data-structure-layer="weekly-bypass">
+      <span>周线结构（不参与评分）</span>
+      <p>方向：${escapeHtml(advice.weeklyTrendDirection || "--")}</p>
+      <p>阶段：${escapeHtml(advice.weeklyTrendStage || "--")}</p>
+      <p>强弱：${escapeHtml(advice.weeklyTrendStrength || "--")}</p>
+      <p>拐头：${escapeHtml(String(advice.turnCount ?? "--"))}</p>
+      <p>区间：${escapeHtml(weeklyZoneText(advice.zones))}</p>
+      <p>依据：${escapeHtml(advice.weeklyTrendBasis || "--")}</p>
+    </div>
+    <div class="rule-advice-section">
       <span>支撑验证状态</span>
       <p>状态：${escapeHtml(supportView.statusText || "--")}${supportView.pathLabel ? ` · ${escapeHtml(supportView.pathLabel)}` : ""}</p>
       <p>验证原因：${escapeHtml(supportView.reason || "尚无验证原因")}</p>
       <p>${escapeHtml(advice.bypassBuyReason || eligibleText)}</p>
+    </div>
+    <div class="rule-advice-section">
+      <span>卖出趋势偏好</span>
+      <p>${escapeHtml(advice.sellTrendBiasNote || "卖出偏好只展示，不改卖出逻辑。")}</p>
     </div>
     ${includeHuman ? `<p class="muted">人工标注：方向 ${escapeHtml(human.humanDirection || "未填写")} / 阶段 ${escapeHtml(human.humanStage || "未填写")} / 支撑 ${escapeHtml(human.humanSupport || "未填写")} / 依据 ${escapeHtml(human.humanEvidence || "未填写")}</p>` : ""}
     ${gaps.length ? `<p class="muted">${escapeHtml(gaps.join("；"))}</p>` : ""}
@@ -6210,7 +6519,7 @@ function bypassStructureSectionHtml(advice, { includeHuman = false } = {}) {
 
 function structureRecognitionSectionHtml(advice) {
   if (!currentReplayCandle()) return "";
-  if (!adviceHasStructureRecognition(advice)) {
+  if (!adviceHasStructureRecognition(advice) && !advice?.weeklyTrendBasis) {
     return `<div class="rule-advice-section structure-recognition-summary" data-structure-layer="training-explanation"><span>结构识别（训练解释，不参与买卖评分）</span><p class="muted">这条建议没有结构识别结果。</p></div>`;
   }
   const human = humanStructureSelections();
@@ -6328,70 +6637,6 @@ async function fetchReplayServerAdvice(payload) {
   }
 }
 
-function replayUsesServerAdvice() {
-  if (replayState.preferServerReplayAdvice === true) return true;
-  try {
-    return window.localStorage?.getItem("trading-advice:use-server-replay-advice") === "1";
-  } catch (error) {
-    return false;
-  }
-}
-
-function replayLevelsFingerprint() {
-  return (replayState.manualLevels || []).map((level) => [
-    level?.id || "",
-    level?.price ?? "",
-    level?.role || "",
-    level?.validationStatus || "",
-    level?.auto ? 1 : 0,
-  ].join(":")).join("|");
-}
-
-function replayAdviceCacheKey() {
-  const candle = currentReplayCandle();
-  const history = replayDailyHistory();
-  const position = replayState.position;
-  const logged = loggedAdviceSnapshotForCurrentCandle();
-  const incomplete = !logged && !replayState.writeTraining && replayState.marketPosition?.status === "held" && !replayMarketPositionForAdvice();
-  const source = replayUsesServerAdvice()
-    ? `server:${replayState.serverAdviceStatus || ""}:${replayState.serverAdviceKey || ""}`
-    : "frontend";
-  return [
-    source,
-    replayState.data?.symbol || "",
-    replayState.data?.market || "",
-    candle?.date || "",
-    replayState.cursor,
-    history.length,
-    history[0]?.date || "",
-    history.at?.(-1)?.date || history[history.length - 1]?.date || "",
-    position ? `${position.entryDate || ""}|${position.entryPrice || ""}|${position.stopLoss || ""}` : "",
-    replayLevelsFingerprint(),
-    logged ? `logged:${logged.action || ""}:${logged.score ?? ""}:${logged.model || ""}` : "live",
-    incomplete ? "incomplete" : "complete",
-  ].join("~");
-}
-
-function readReplayAdviceCache(key) {
-  const map = replayState.frontendAdviceCacheMap;
-  if (!map || !map.has(key)) return null;
-  const advice = map.get(key);
-  map.delete(key);
-  map.set(key, advice);
-  return advice;
-}
-
-function rememberReplayAdviceCache(key, advice) {
-  if (!replayState.frontendAdviceCacheMap) replayState.frontendAdviceCacheMap = new Map();
-  const map = replayState.frontendAdviceCacheMap;
-  if (map.has(key)) map.delete(key);
-  map.set(key, advice);
-  while (map.size > 8) {
-    const oldest = map.keys().next().value;
-    map.delete(oldest);
-  }
-}
-
 function frontendReplayAdvice() {
   if (!currentReplayCandle()) return null;
   const history = replayDailyHistory();
@@ -6406,195 +6651,13 @@ function frontendReplayAdvice() {
 
 function withLiveStructure(advice, { frozen = false } = {}) {
   if (!advice || frozen || !currentReplayCandle()) return advice;
-  const key = replayAdviceCacheKey();
-  if (advice.replayStructureKey === key) return advice;
-  const structured = attachStructureRecognition(advice, replayDailyHistory());
-  if (structured && typeof structured === "object") structured.replayStructureKey = key;
-  return structured;
-}
-
-function replayStructuredAdvice() {
-  if (!currentReplayCandle()) return replayServerAdvicePlaceholder();
-  const key = replayAdviceCacheKey();
-  const cached = readReplayAdviceCache(key);
-  if (cached) return cached;
-  const logged = loggedAdviceSnapshotForCurrentCandle();
-  const incomplete = !logged && !replayState.writeTraining && replayState.marketPosition?.status === "held" && !replayMarketPositionForAdvice();
-  const history = replayDailyHistory();
-  let advice;
-  if (logged) {
-    advice = attachStructureRecognition({ ...logged }, history);
-  } else if (replayUsesServerAdvice() && replayState.serverAdvice) {
-    advice = attachStructureRecognition({ ...replayState.serverAdvice }, history);
-  } else {
-    advice = frontendReplayAdvice() || replayServerAdvicePlaceholder();
-  }
-  if (incomplete && advice) {
-    advice = {
-      ...advice,
-      side: "sell",
-      sideLabel: "卖出观察",
-      action: "hold_position",
-      actionText: "请先填写买入日期、买入价格和止损价格",
-      stage: "持仓信息不完整",
-      model: "持仓状态记录",
-      score: null,
-      matched: ["当前状态为已持仓"],
-      missing: ["需要买入日期", "需要买入价格", "需要止损价格"],
-      plan: ["补充持仓信息后，AI将按卖出观察方向评估。"],
-    };
-  }
-  if (advice && typeof advice === "object") advice.replayStructureKey = key;
-  rememberReplayAdviceCache(key, advice);
-  return advice;
-}
-
-function replayDisplayAdvice() {
-  const advice = replayStructuredAdvice();
-  if (!advice || typeof advice !== "object") return advice;
-  return applyHumanSupportBuyGate({ ...advice });
+  return attachStructureRecognition(advice, replayDailyHistory());
 }
 
 function activeReplayAdvice() {
-  return replayStructuredAdvice();
-}
-
-function applyHumanSupportBuyGate(advice, humanOverride) {
-  if (!advice || typeof advice !== "object") return advice;
-  const lockedScore = advice.score;
-  const lockedModel = advice.model;
-  const lockedMatched = advice.matched;
-  const lockedParticipates = advice.participatesInScoring;
-  const protectAction = advice.side === "sell" || advice.action === "sell" || advice.action === "hold_position";
-  const copy = { ...advice };
-  const human = humanOverride || bottomHumanSupportFields();
-  const status = String(human.status || human.humanSupportStatus || "").trim();
-  const evidence = String(human.evidence || human.humanEvidence || human.evidenceText || "").trim();
-  const path = human.pathId || human.pathLabel
-    ? { pathId: human.pathId || "", pathLabel: human.pathLabel || "" }
-    : humanSupportPath(evidence);
-  const finiteOrNull = (value) => {
-    if (value == null || value === "") return null;
-    const number = Number(value);
-    return Number.isFinite(number) ? number : null;
-  };
-  let stopPct = finiteOrNull(copy.bypassStopLossPct);
-  if (stopPct == null) stopPct = finiteOrNull(copy.stopRiskPct);
-  let riskReward = finiteOrNull(copy.bypassRiskReward);
-  if (stopPct == null || riskReward == null) {
-    const close = typeof currentReplayCandle === "function" ? Number(currentReplayCandle()?.close || 0) : 0;
-    const stop = Number(copy.stopLoss || 0);
-    const resistance = Number(copy.pressurePlan?.price || copy.pressurePlan?.level?.price || 0);
-    if (stopPct == null && close > stop && stop > 0) stopPct = ((close - stop) / close) * 100;
-    if (riskReward == null && close > stop && stop > 0 && resistance > close) riskReward = (resistance - close) / (close - stop);
-  }
-  if (stopPct != null) copy.bypassStopLossPct = Number(stopPct.toFixed(2));
-  if (riskReward != null) copy.bypassRiskReward = Number(riskReward.toFixed(2));
-  const geometryOk = stopPct != null && stopPct >= 3 - 1e-6 && stopPct <= 8 + 1e-6 && riskReward != null && riskReward >= 3 - 1e-8;
-  const geometryText = `盈亏比 ${riskReward == null ? "未计算" : riskReward.toFixed(2)}（需至少3），止损 ${stopPct == null ? "未计算" : `${stopPct.toFixed(2)}%`}（约3%到8%）`;
-  const validated = new Set(["真实支撑", "已验证", "validated"]);
-  const watchStatuses = new Set(["待验证", "候选", "验证中", "跌破后收回", "candidate", "testing", "reclaimed"]);
-  const invalidStatuses = new Set(["失效", "已失效", "已过期", "broken", "expired", "invalidated"]);
-  const labels = {
-    "候选": "待验证",
-    "candidate": "待验证",
-    "待验证": "待验证",
-    "验证中": "验证中",
-    "testing": "验证中",
-    "真实支撑": "真实支撑",
-    "已验证": "真实支撑",
-    "validated": "真实支撑",
-    "失效": "失效",
-    "已失效": "失效",
-    "broken": "失效",
-    "invalidated": "失效",
-    "跌破后收回": "跌破后收回",
-    "reclaimed": "跌破后收回",
-    "已过期": "已过期",
-    "expired": "已过期",
-  };
-  const codes = {
-    "待验证": "candidate",
-    "验证中": "testing",
-    "真实支撑": "validated",
-    "失效": "invalidated",
-    "跌破后收回": "reclaimed",
-    "已过期": "expired",
-  };
-
-  const lock = () => {
-    copy.score = lockedScore;
-    copy.model = lockedModel;
-    copy.matched = lockedMatched;
-    copy.participatesInScoring = lockedParticipates;
-    return copy;
-  };
-  const setWatch = (reason) => {
-    copy.bypassBuyEligible = false;
-    copy.bypassBuyReason = reason;
-    if (!protectAction) {
-      copy.action = "watch";
-      copy.actionText = "建议观望";
-    }
-    return lock();
-  };
-  const setBuy = (reason) => {
-    copy.bypassBuyEligible = true;
-    copy.bypassBuyReason = reason;
-    if (!protectAction) {
-      copy.action = "buy";
-      copy.actionText = "建议买入";
-    }
-    return lock();
-  };
-  const overlayValidation = (label, mappedStatus, reason) => {
-    const previous = copy.bypassSupportValidation && typeof copy.bypassSupportValidation === "object" ? copy.bypassSupportValidation : {};
-    copy.bypassSupportValidation = {
-      ...previous,
-      status: mappedStatus,
-      label,
-      pathId: path.pathId || "",
-      pathLabel: path.pathLabel || "",
-      validationReason: reason,
-      supportValidationReason: reason,
-      participatesInScoring: false,
-    };
-  };
-
-  if (!status) {
-    if (copy.bypassBuyEligible === true && geometryOk) {
-      return setBuy(copy.bypassBuyReason || `跟随系统旁路：支撑已验证。${geometryText}。不替换原买入模型评分。`);
-    }
-    if (copy.action === "buy") {
-      const prior = copy.bypassBuyReason ? `${copy.bypassBuyReason} ` : "";
-      return setWatch(`跟随系统旁路未通过：需要真实支撑、盈亏比至少3、止损约3%到8%。${prior}${geometryText}。原评分不变。`);
-    }
-    copy.bypassBuyEligible = false;
-    return lock();
-  }
-
-  const label = labels[status] || status;
-  const mappedStatus = codes[label] || "candidate";
-  if (validated.has(status)) {
-    overlayValidation(label, "validated", evidence);
-    if (!evidence) {
-      return setWatch("人工标注为真实支撑，但支撑验证依据为空，不允许买入。原评分不变。");
-    }
-    if (!geometryOk) {
-      return setWatch(`人工真实支撑。验证原因：${evidence}。买入未通过：${geometryText}。原评分不变。`);
-    }
-    return setBuy(`人工真实支撑。验证原因：${evidence}。${geometryText}，当前满足。不替换原买入模型评分。`);
-  }
-  if (watchStatuses.has(status)) {
-    overlayValidation(label, mappedStatus, evidence ? `人工标注为${label}。依据：${evidence}。尚未升为真实支撑。` : `人工标注为${label}，尚未升为真实支撑。`);
-    return setWatch(`人工支撑状态：${label}。即使原评分达到买入线，也先观望。原评分不变。`);
-  }
-  if (invalidStatuses.has(status)) {
-    overlayValidation(label, mappedStatus, evidence ? `人工标注为${label}。依据：${evidence}。` : `人工标注为${label}，支撑不再作为买入依据。`);
-    return setWatch(`人工支撑状态：${label}。买入建议改为观望。原评分不变。`);
-  }
-  overlayValidation(label, mappedStatus, evidence || `人工支撑状态：${label}。`);
-  return setWatch(`人工支撑状态：${label}。未确认为真实支撑，买入建议改为观望。原评分不变。`);
+  const logged = loggedAdviceSnapshotForCurrentCandle();
+  if (logged) return logged;
+  return withLiveStructure(replayState.serverAdvice || frontendReplayAdvice() || replayServerAdvicePlaceholder());
 }
 
 function renderRuleAdvice() {
@@ -6606,14 +6669,28 @@ function renderRuleAdvice() {
   const copyButton = document.querySelector("#copyRuleAdviceSummary");
   const executeButton = document.querySelector("#executeRuleAdvice");
   if (!stageNode || !scoreNode || !bodyNode) return;
+  const loggedAdvice = loggedAdviceSnapshotForCurrentCandle();
+  let advice = loggedAdvice || replayState.serverAdvice || frontendReplayAdvice() || replayServerAdvicePlaceholder();
   if (titleNode) {
     const data = replayState.data || {};
     const symbol = displaySecuritySymbol(data, data.symbol || document.querySelector("#replaySymbol")?.value?.trim() || "--");
     const name = data.name || document.querySelector("#replayStockSearch")?.dataset.name || "";
     titleNode.textContent = name ? `AI\u7b56\u7565 (${symbol} ${name})` : `AI\u7b56\u7565 (${symbol})`;
   }
-  const advice = replayDisplayAdvice();
-  const loggedAdvice = loggedAdviceSnapshotForCurrentCandle();
+  if (!loggedAdvice && !replayState.writeTraining && replayState.marketPosition?.status === "held" && !replayMarketPositionForAdvice()) {
+    advice.side = "sell";
+    advice.sideLabel = "\u5356\u51fa\u89c2\u5bdf";
+    advice.action = "hold_position";
+    advice.actionText = "\u8bf7\u5148\u586b\u5199\u4e70\u5165\u65e5\u671f\u3001\u4e70\u5165\u4ef7\u683c\u548c\u6b62\u635f\u4ef7\u683c";
+    advice.stage = "\u6301\u4ed3\u4fe1\u606f\u4e0d\u5b8c\u6574";
+    advice.model = "\u6301\u4ed3\u72b6\u6001\u8bb0\u5f55";
+    advice.score = null;
+    advice.matched = ["\u5f53\u524d\u72b6\u6001\u4e3a\u5df2\u6301\u4ed3"];
+    advice.missing = ["\u9700\u8981\u4e70\u5165\u65e5\u671f", "\u9700\u8981\u4e70\u5165\u4ef7\u683c", "\u9700\u8981\u6b62\u635f\u4ef7\u683c"];
+    advice.plan = ["\u8865\u5145\u6301\u4ed3\u4fe1\u606f\u540e\uff0cAI\u5c06\u6309\u5356\u51fa\u89c2\u5bdf\u65b9\u5411\u8bc4\u4f30\u3002"];
+  }
+  if (!loggedAdvice) advice = withLiveStructure(advice);
+  else if (currentReplayCandle()) advice = attachStructureRecognition({ ...advice }, replayDailyHistory());
   const hasCandle = Boolean(currentReplayCandle());
   if (copyButton) copyButton.disabled = !hasCandle;
   if (executeButton) executeButton.disabled = !hasCandle;
@@ -6876,7 +6953,7 @@ function inferAiAdviceFeedback(action, reason, note, advice = currentAiAdviceSna
 
 
 function currentAiAdviceSnapshot() {
-  const advice = replayDisplayAdvice() || {};
+  const advice = activeReplayAdvice();
   return {
     trendDirection: advice.trendDirection || advice.trend?.direction || "",
     trendStage: advice.trendStage || advice.stage || "",
@@ -6886,8 +6963,15 @@ function currentAiAdviceSnapshot() {
     supportValidation: advice.supportValidation || null,
     resistanceValidation: advice.resistanceValidation || null,
     bypassSupportValidation: advice.bypassSupportValidation || null,
+    weeklyTrendDirection: advice.weeklyTrendDirection || "",
+    weeklyTrendStage: advice.weeklyTrendStage || "",
+    weeklyTrendStrength: advice.weeklyTrendStrength || "",
+    weeklyTrendBasis: advice.weeklyTrendBasis || "",
+    zones: advice.zones || null,
+    turnCount: advice.turnCount ?? null,
     bypassBuyEligible: advice.bypassBuyEligible === true,
     bypassBuyReason: advice.bypassBuyReason || "",
+    sellTrendBiasNote: advice.sellTrendBiasNote || "",
     side: advice.side || "",
     sideLabel: advice.sideLabel || "",
     action: advice.action || "",
@@ -6937,8 +7021,15 @@ function normalizeLoggedAdviceSnapshot(record) {
     supportValidation: snapshot?.supportValidation || null,
     resistanceValidation: snapshot?.resistanceValidation || null,
     bypassSupportValidation: snapshot?.bypassSupportValidation || null,
+    weeklyTrendDirection: snapshot?.weeklyTrendDirection || "",
+    weeklyTrendStage: snapshot?.weeklyTrendStage || "",
+    weeklyTrendStrength: snapshot?.weeklyTrendStrength || "",
+    weeklyTrendBasis: snapshot?.weeklyTrendBasis || "",
+    zones: snapshot?.zones || null,
+    turnCount: snapshot?.turnCount ?? null,
     bypassBuyEligible: snapshot?.bypassBuyEligible === true,
     bypassBuyReason: snapshot?.bypassBuyReason || "",
+    sellTrendBiasNote: snapshot?.sellTrendBiasNote || "",
     stopLoss: snapshot?.stopLoss || record?.stopLoss || null,
     stopBasis: snapshot?.stopBasis || record?.stopLossReason || "",
     stopRiskPct: snapshot?.stopRiskPct == null ? null : snapshot.stopRiskPct,
@@ -6956,10 +7047,7 @@ function loggedAdviceSnapshotForCurrentCandle() {
 function refreshReplayAdviceFromLevels({ resetFeedback = false } = {}) {
   syncManualLevelInputs();
   if (replayState.backtestMode) updateBacktestLevelUi();
-  if (!replayState.backtestMode) {
-    if (replayUsesServerAdvice()) requestReplayServerAdvice();
-    else renderRuleAdvice();
-  }
+  if (!replayState.backtestMode) requestReplayServerAdvice();
   drawReplayChart();
   if (resetFeedback && !replayState.backtestMode) resetAiAdviceFeedback();
 }
@@ -7215,13 +7303,14 @@ function updateReplayUi() {
   `).join("");
   renderRuleAdvice();
   drawReplayChart();
-  if (replayUsesServerAdvice()) requestReplayServerAdvice();
+  requestReplayServerAdvice();
 }
 
 function invalidateReplayServerAdvice() {
   replayState.serverAdvice = null;
   replayState.serverAdviceKey = "";
   replayState.serverAdviceStatus = "idle";
+  renderRuleAdvice();
 }
 
 function replayTrainingAnnotations(advice = currentAiAdviceSnapshot()) {
@@ -7231,6 +7320,9 @@ function replayTrainingAnnotations(advice = currentAiAdviceSnapshot()) {
     aiTrendConfidence: advice.trendConfidence ?? null,
     aiSupportValidation: advice.supportValidation || null,
     aiResistanceValidation: advice.resistanceValidation || null,
+    aiWeeklyTrendDirection: advice.weeklyTrendDirection || "",
+    aiWeeklyTrendStage: advice.weeklyTrendStage || "",
+    aiWeeklyTrendBasis: advice.weeklyTrendBasis || "",
     aiSupportValidationReason: advice.bypassSupportValidation?.validationReason || advice.supportValidation?.validationReason || "",
     aiSupportPathId: advice.bypassSupportValidation?.pathId || "",
     humanTrendDirection: document.querySelector("#replayTrendDirection")?.value || "",
@@ -7776,7 +7868,7 @@ function renderBacktestAdvice(advice = currentBacktestAdvice()) {
   if (structureNode) {
     const structure = currentReplayCandle() ? recognizeMarketStructure(replayDailyHistory()) : null;
     structureNode.textContent = structure?.trendDirection
-      ? `${structure.trendDirection} / ${structure.trendStage} / 置信度 ${Math.round(structure.trendConfidence)}`
+      ? `${structure.trendDirection} / ${structure.trendStage} / 置信度 ${Math.round(structure.trendConfidence)}；周线 ${structure.weeklyTrendDirection || "--"} / ${structure.weeklyTrendStage || "--"}`
       : "--";
   }
 }
@@ -8944,13 +9036,7 @@ document.querySelector("#backtestDeleteSelectedLevel")?.addEventListener("click"
   syncBacktestManualLevels();
   updateBacktestLevelUi();
 });
-["#replaySupportStatus", "#replaySupportEvidence"].forEach((selector) => {
-  document.querySelector(selector)?.addEventListener("change", () => {
-    recordBottomSelectLevelCorrection();
-    renderRuleAdvice();
-  });
-});
-["#replayTrendDirection", "#replayTrendStage", "#replayStructure"].forEach((selector) => {
+["#replayTrendDirection", "#replayTrendStage", "#replaySupportStatus", "#replaySupportEvidence", "#replayStructure"].forEach((selector) => {
   document.querySelector(selector)?.addEventListener("change", () => renderRuleAdvice());
 });
 document.querySelector("#copyRuleAdviceSummary")?.addEventListener("click", copyRuleAdviceSummary);

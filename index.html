@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AI交易工作台</title>
-    <link rel="stylesheet" href="styles.css?v=20260618-watch-realtime-price" />
+    <link rel="stylesheet" href="styles.css?v=20260810-structure-confirm" />
   </head>
   <body>
     <main class="app-shell">
@@ -22,8 +22,9 @@
         <nav class="mode-tabs" aria-label="&#27169;&#22359;&#20999;&#25442;">
           <button class="tab-button hidden" type="button" data-view="market" aria-hidden="true" tabindex="-1">&#34892;&#24773;</button>
           <button class="tab-button active" type="button" data-view="replay">&#34892;&#24773;&#19982;&#35757;&#32451;</button>
-          <button class="tab-button" type="button" data-view="backtest">AI&#24314;&#35758;&#22238;&#27979;</button>
           <button class="tab-button" type="button" data-view="dataset">&#35757;&#32451;&#38598;&#31649;&#29702;</button>
+          <button class="tab-button" type="button" data-view="simulation">模拟交易</button>
+          <button class="tab-button" type="button" data-view="simulation-records">模拟交易记录</button>
         </nav>
 
         <section class="market-view hidden" id="marketView">
@@ -37,7 +38,7 @@
               </div>
               <label class="stock-search-label market-search-label">
                 &#25628;&#32034;&#32929;&#31080;
-                <input id="marketStockSearch" type="text" placeholder="&#20195;&#30721; / &#20840;&#31216; / &#31616;&#31216;" autocomplete="off" />
+                <input id="marketStockSearch" type="text" placeholder="代码 / 全称 / 简称 / 期货代码" autocomplete="off" />
                 <div class="stock-search-results hidden" id="marketStockSearchResults"></div>
               </label>
               <button class="primary-button" id="marketLoadStock" type="button">&#26597;&#30475;&#34892;&#24773;</button>
@@ -288,15 +289,19 @@
         </section>
 
         <section class="replay-view" id="replayView">
-          <button class="secondary-button replay-expand-watchlist hidden" id="expandTrainingWatchlist" type="button">&#23637;&#24320;&#33258;&#36873;</button>
+          <button class="secondary-button replay-expand-watchlist hidden" id="expandTrainingWatchlist" type="button">展开股票池</button>
           <div class="replay-layout">
             <aside class="training-watchlist-panel" id="trainingWatchlistPanel">
               <div class="training-watchlist-head">
                 <div>
-                  <h3>&#33258;&#36873;&#32929;</h3>
+                  <h3>股票池</h3>
                   <small id="trainingWatchlistCount">0 &#21482;</small>
                 </div>
-                <button class="text-button" id="toggleTrainingWatchlist" type="button" aria-expanded="true">&#25910;&#36215;</button>
+                <div class="training-watchlist-actions">
+                  <button class="text-button" id="getTrainingWatchlist" type="button">获取行情</button>
+                  <button class="text-button" id="refreshTrainingWatchlist" type="button">刷新行情</button>
+                  <button class="text-button" id="toggleTrainingWatchlist" type="button" aria-expanded="true">&#25910;&#36215;</button>
+                </div>
               </div>
               <div class="watchlist training-watchlist" id="trainingWatchlist"></div>
             </aside>
@@ -351,6 +356,7 @@
                       <label>线类型
                         <select id="selectedLevelRole">
                           <option value="support">支撑</option>
+                          <option value="pending_support">待回踩确认支撑</option>
                           <option value="near_resistance">近端压力</option>
                           <option value="effective_resistance">有效压力</option>
                           <option value="breakout_target">突破目标</option>
@@ -364,41 +370,47 @@
                   </div>
 
                   <div class="field-grid replay-structure-grid">
-                    <label class="wide-field">趋势结构说明 <input id="replayStructure" type="text" placeholder="如：上升趋势中的大调整" /></label>
-                    <label>人工趋势方向
+                    <label>趋势方向
                       <select id="replayTrendDirection">
-                        <option value="">未填写</option>
-                        <option value="上涨">上涨</option>
-                        <option value="下跌">下跌</option>
-                        <option value="盘整">盘整</option>
-                        <option value="趋势转换中">趋势转换中</option>
+                        <option value="">跟随AI判断</option>
+                        <option value="up">上涨</option>
+                        <option value="down">下跌</option>
+                        <option value="range">盘整</option>
+                        <option value="transition">趋势转换中</option>
                       </select>
                     </label>
-                    <label>人工趋势阶段
+                    <label>趋势阶段
                       <select id="replayTrendStage">
-                        <option value="">未填写</option>
-                        <option value="超跌反弹">超跌反弹</option>
-                        <option value="趋势修复">趋势修复</option>
-                        <option value="震荡筑底">震荡筑底</option>
-                        <option value="突破确认">突破确认</option>
-                        <option value="回踩确认">回踩确认</option>
-                        <option value="盘整区间">盘整区间</option>
-                        <option value="上涨延续">上涨延续</option>
-                        <option value="下跌延续">下跌延续</option>
+                        <option value="">跟随AI判断</option>
+                        <option value="上升趋势回调/延续观察">上升趋势回调/延续观察</option>
+                        <option value="上升趋势中的大调整，等待踩稳确认">上升趋势中的大调整，等待踩稳确认</option>
+                        <option value="长期下跌后尝试趋势扭转">长期下跌后尝试趋势扭转</option>
+                        <option value="弱势结构，只做反弹模型">弱势结构，只做反弹模型</option>
+                        <option value="急跌后修复观察">急跌后修复观察</option>
+                        <option value="盘整结构，等待区间边界确认">盘整结构，等待区间边界确认</option>
+                        <option value="oversold_rebound">下跌趋势中的超跌反弹</option>
+                        <option value="repair">下跌趋势修复</option>
+                        <option value="base_building">震荡筑底</option>
+                        <option value="breakout_confirmation">突破确认</option>
+                        <option value="retest_confirmation">回踩确认</option>
+                        <option value="range_arbitrage">盘整区间</option>
+                        <option value="uptrend_continuation">上涨趋势延续</option>
+                        <option value="downtrend_continuation">下跌趋势延续</option>
+                        <option value="trend_transition">趋势转换中</option>
                       </select>
                     </label>
-                    <label>人工支撑状态
+                    <label>支撑状态
                       <select id="replaySupportStatus">
-                        <option value="">未填写</option>
+                        <option value="">跟随系统判断</option>
                         <option value="待验证">待验证</option>
-                        <option value="验证中">验证中</option>
                         <option value="真实支撑">真实支撑</option>
                         <option value="失效">失效</option>
-                        <option value="候选">候选</option>
-                        <option value="已验证">已验证</option>
-                        <option value="已失效">已失效</option>
-                        <option value="跌破后收回">跌破后收回</option>
-                        <option value="已过期">已过期</option>
+                        <option value="candidate">候选</option>
+                        <option value="testing">验证中</option>
+                        <option value="validated">已验证</option>
+                        <option value="broken">已失效</option>
+                        <option value="reclaimed">跌破后收回</option>
+                        <option value="expired">已过期</option>
                       </select>
                     </label>
                     <label>支撑验证依据
@@ -408,12 +420,15 @@
                         <option value="跌破后回踩确认">跌破后回踩确认</option>
                         <option value="底部形态">底部形态</option>
                         <option value="平台突破回踩">平台突破回踩</option>
-                        <option value="头肩底">头肩底</option>
-                        <option value="突破回踩">突破回踩</option>
-                        <option value="多次回踩反弹">多次回踩反弹</option>
-                        <option value="假跌破后收回">假跌破后收回</option>
-                        <option value="人工结构判断">人工结构判断</option>
+                        <option value="head_shoulders_bottom">头肩底</option>
+                        <option value="breakout_retest">突破回踩</option>
+                        <option value="multiple_retests">多次回踩反弹</option>
+                        <option value="false_break_reclaim">假跌破后收回</option>
+                        <option value="manual_structure">人工结构判断</option>
                       </select>
+                    </label>
+                    <label class="full-width">趋势结构说明
+                      <input id="replayStructure" type="text" placeholder="说明当前结构和人工修正原因" />
                     </label>
                   </div>
                 </div>
@@ -422,13 +437,12 @@
                   <section class="rule-advice-panel" id="ruleAdvicePanel" aria-live="polite">
                     <div class="rule-advice-header">
                       <div class="rule-advice-title-block">
-                        <h3>AI建议</h3>
+                        <h3 id="ruleAdviceTitle">AI策略</h3>
                         <p id="ruleAdviceStage">等待K线数据</p>
                         <div class="rule-advice-action-card watch" id="ruleAdviceActionText"><span>操作建议</span><strong>--</strong></div>
                       </div>
                       <div class="rule-advice-actions">
                         <button class="rule-copy-button" id="copyRuleAdviceSummary" type="button" disabled>复制摘要</button>
-                        <button class="rule-copy-button" id="executeRuleAdvice" type="button" disabled>执行AI建议</button>
                         <strong id="ruleAdviceScore">--</strong>
                       </div>
                     </div>
@@ -468,29 +482,12 @@
                   </section>
 
                   <div class="replay-navigation-actions" aria-label="训练时间导航">
-                    <button class="secondary-button" id="replayPrevCandle" type="button" disabled>回到上一日</button>
-                    <button class="secondary-button" id="replayNextCandle" type="button" disabled>下一日不记录</button>
-                    <span>仅浏览K线，不写入训练集</span>
+                    <button class="secondary-button" id="replayPrevCandle" type="button" disabled>上一日</button>
+                    <button class="secondary-button" id="replayNextCandle" type="button" disabled>下一日</button>
+                    <span>AI自动执行策略</span>
                   </div>
 
-                  <div class="decision-actions">
-                    <div class="decision-entry decision-buy-entry">
-                      <button class="primary-button" id="replayBuy" type="button">买入</button>
-                      <div class="buy-entry-fields">
-                        <label>买入理由 <textarea id="replayBuyReason" placeholder="点击买入前填写"></textarea></label>
-                        <label class="buy-stop-field hidden">止损价格 <input id="replayStopLoss" type="number" min="0" step="0.01" /></label>
-                        <label class="buy-stop-field hidden">止损原因（选填） <textarea id="replayStopLossReason" placeholder="可选：说明为什么把止损设在这里"></textarea></label>
-                      </div>
-                    </div>
-                    <div class="decision-entry decision-sell-entry hidden">
-                      <button class="secondary-button" id="replaySell" type="button" disabled>卖出</button>
-                      <label>卖出理由 <textarea id="replaySellReason" placeholder="点击卖出前填写"></textarea></label>
-                    </div>
-                    <div class="decision-entry">
-                      <button class="secondary-button" id="replayHold" type="button">观望</button>
-                      <label>备注 <textarea id="replayHoldNote" placeholder="记录这个交易日需要备注的信息"></textarea></label>
-                    </div>
-                  </div>
+                  <div class="decision-actions decision-actions-auto" style="display:none">
 
                   <p class="training-status" id="replayStatus" role="status" aria-live="polite"></p>
                   <div class="level-table" id="replayLog"></div>
@@ -621,10 +618,27 @@
             <div class="dataset-list" id="trainingRecordList"></div>
           </div>
         </section>
+
+        <section class="dataset-view hidden" id="simulationRecordsView">
+          <div class="dataset-manager standalone" aria-label="模拟交易记录">
+            <div class="dataset-header">
+              <div>
+                <h2>模拟交易记录</h2>
+                <p>仅显示模拟交易模块执行的交易，按时间查看每一笔操作</p>
+              </div>
+              <div class="dataset-header-actions">
+                <button class="secondary-button simulation-record-filter active" type="button" data-simulation-filter="open">持仓中</button>
+                <button class="secondary-button simulation-record-filter" type="button" data-simulation-filter="all">全部</button>
+                <button class="secondary-button" id="refreshSimulationRecords" type="button">刷新记录</button>
+              </div>
+            </div>
+            <p class="training-status" id="simulationRecordsStatus" role="status" aria-live="polite"></p>
+            <div class="dataset-list" id="simulationRecordList"></div>
+          </div>
+        </section>
       </section>
     </main>
-
-    <script src="strategy-core.js"></script>
+    <script src="strategy-core.js?v=20261018-structure-recognition"></script>
     <script src="app.js?v=20261018-structure-recognition"></script>
   </body>
 </html>

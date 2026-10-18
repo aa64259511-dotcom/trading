@@ -183,18 +183,40 @@ assertDecisionUnchanged(withLevels, frozenDecisions.levels, levels, null);
 assertDecisionUnchanged(withLevels, frozenDecisions.position, levels, { entryPrice: withLevels.at(-20).close, entryDate: withLevels.at(-20).date, stopLoss: withLevels.at(-20).close * 0.95 });
 
 assert.strictEqual(upStructure.participatesInScoring, false);
-assert.strictEqual(upStructure.weeklyTrendDirection, undefined);
-assert.strictEqual(upStructure.weeklyTrendStage, undefined);
-assert.strictEqual(upStructure.weeklyTrendBasis, undefined);
+assert.strictEqual(upStructure.weeklyTrendDirection, "上涨", upStructure.weeklyTrendBasis);
+assert.ok(upStructure.weeklyTrendStage);
+assert.ok(upStructure.weeklyTrendStrength);
+assert.ok(upStructure.weeklyTrendBasis);
+assert.strictEqual(typeof upStructure.turnCount, "number");
+assert.ok(upStructure.zones);
+assert.strictEqual(downStructure.weeklyTrendDirection, "下跌", downStructure.weeklyTrendBasis);
+assert.notStrictEqual(upStructure.weeklyTrendDirection, downStructure.weeklyTrendDirection);
 assert.strictEqual(upStructure.bypassSupportValidation.participatesInScoring, false);
+assert.ok(upStructure.sellTrendBiasNote);
+assert.ok(!upStructure.sellTrendBiasNote.includes("评分权重"));
 
+function redate(bars, offset) {
+  return bars.map((bar, index) => ({ ...bar, date: dateAt(offset + index) }));
+}
 const reversalDown = wave(140, { start: 220, drift: -0.5, amplitude: 1.2 });
-const reversalLater = core.recognizeMarketStructure(reversalDown.concat(wave(140, { start: reversalDown.at(-1).close, drift: 0.55, amplitude: 1.2 }).map((bar, index) => ({ ...bar, date: dateAt(140 + index) }))));
-const rangeStructure = core.recognizeMarketStructure(Array.from({ length: 180 }, (_, index) => {
+const reversalUp = redate(wave(140, { start: reversalDown.at(-1).close, drift: 0.55, amplitude: 1.2 }), 140);
+const reversalEarly = core.recognizeMarketStructure(reversalDown);
+const reversalLater = core.recognizeMarketStructure(reversalDown.concat(reversalUp));
+assert.strictEqual(reversalEarly.weeklyTrendDirection, "下跌", reversalEarly.weeklyTrendBasis);
+assert.strictEqual(reversalLater.weeklyTrendDirection, "上涨", reversalLater.weeklyTrendBasis);
+assert.notStrictEqual(reversalEarly.weeklyTrendStage, reversalLater.weeklyTrendStage);
+assert.ok(reversalLater.weeklyTrendBasis.includes(reversalLater.asOfDate) || reversalLater.weeklyTrendBasis.includes("已收盘周线"));
+
+const rangedWeeks = [];
+for (let index = 0; index < 180; index += 1) {
   const close = 100 + Math.sin(index / 8) * 14;
-  const prev = index ? 100 + Math.sin((index - 1) / 8) * 14 : close;
-  return candle(index, prev, Math.max(prev, close) + 0.4, Math.min(prev, close) - 0.4, close);
-}));
+  const prev = rangedWeeks.at(-1)?.close || close;
+  rangedWeeks.push(candle(index, prev, Math.max(prev, close) + 0.4, Math.min(prev, close) - 0.4, close));
+}
+const rangeStructure = core.recognizeMarketStructure(rangedWeeks);
+assert.strictEqual(rangeStructure.weeklyTrendDirection, "盘整", rangeStructure.weeklyTrendBasis);
+assert.ok(rangeStructure.turnCount >= 3, `turnCount ${rangeStructure.turnCount}`);
+assert.strictEqual(rangeStructure.weeklyTrendStage, "盘整结构，等待区间边界确认");
 
 function assertValidatedReasons(structure) {
   const seen = [...(structure.supportCandidates || [])];
@@ -220,9 +242,8 @@ assert.strictEqual(bypassAdvice.score, frozenDecisions.up.score);
 assert.strictEqual(bypassAdvice.action, frozenDecisions.up.action);
 assert.strictEqual(bypassAdvice.stage, frozenDecisions.up.stage);
 assert.strictEqual(bypassAdvice.bypassParticipatesInScoring, false);
-assert.strictEqual(bypassAdvice.weeklyTrendDirection, undefined);
+assert.ok(bypassAdvice.weeklyTrendDirection);
 assert.ok(bypassAdvice.bypassBuyReason);
-assert.ok(!bypassAdvice.bypassBuyReason.includes("周线"));
 
 const generated = require("fs").readFileSync("./strategy-core.js", "utf8");
 const adviceStart = generated.indexOf("function ruleLibraryAdvice(");
@@ -231,170 +252,6 @@ assert.ok(adviceStart > 0 && adviceEnd > adviceStart);
 const adviceSource = generated.slice(adviceStart, adviceEnd);
 assert.ok(!adviceSource.includes("recognizeMarketStructure"));
 assert.ok(!adviceSource.includes("trendConfidence"));
-
-function extractAppFunction(source, name) {
-  const marker = `function ${name}(`;
-  const start = source.indexOf(marker);
-  assert.ok(start >= 0, name);
-  const signatureEnd = source.indexOf(") {", start);
-  const brace = signatureEnd + 2;
-  let depth = 0;
-  let quote = "";
-  let escaped = false;
-  for (let index = brace; index < source.length; index += 1) {
-    const char = source[index];
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === quote) quote = "";
-      continue;
-    }
-    if (char === '"' || char === "'" || char === "`") {
-      quote = char;
-      continue;
-    }
-    if (char === "{") depth += 1;
-    if (char === "}") {
-      depth -= 1;
-      if (depth === 0) return source.slice(start, index + 1);
-    }
-  }
-  throw new Error(`Unclosed function: ${name}`);
-}
-
-const appSource = require("fs").readFileSync("./app.js", "utf8");
-const gateContext = {};
-require("vm").runInNewContext(
-  `${extractAppFunction(appSource, "humanSupportPath")}\n${extractAppFunction(appSource, "applyHumanSupportBuyGate")}\nthis.humanSupportPath = humanSupportPath;\nthis.applyHumanSupportBuyGate = applyHumanSupportBuyGate;`,
-  gateContext,
-);
-const baseBuy = {
-  side: "buy",
-  action: "buy",
-  actionText: "建议买入",
-  score: 86,
-  model: "上升趋势延续",
-  matched: ["结构确认"],
-  participatesInScoring: false,
-  stage: "回踩确认",
-  bypassBuyEligible: false,
-  bypassBuyReason: "原旁路未开启",
-  bypassRiskReward: 4,
-  bypassStopLossPct: 5,
-  bypassSupportValidation: { status: "candidate", label: "待验证", validationReason: "系统原因", participatesInScoring: false },
-};
-const gatedWatch = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "待验证", evidence: "" });
-assert.strictEqual(gatedWatch.action, "watch");
-assert.strictEqual(gatedWatch.actionText, "建议观望");
-assert.strictEqual(gatedWatch.score, 86);
-assert.strictEqual(gatedWatch.model, "上升趋势延续");
-assert.strictEqual(gatedWatch.matched, baseBuy.matched);
-assert.strictEqual(gatedWatch.participatesInScoring, false);
-assert.strictEqual(baseBuy.action, "buy");
-const gatedCandidate = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "候选", evidence: "多次回踩反弹" });
-assert.strictEqual(gatedCandidate.action, "watch");
-assert.strictEqual(gatedCandidate.score, 86);
-const gatedReclaimed = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "跌破后收回", evidence: "" });
-assert.strictEqual(gatedReclaimed.action, "watch");
-const gatedBroken = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "失效", evidence: "" });
-assert.strictEqual(gatedBroken.action, "watch");
-assert.strictEqual(gatedBroken.bypassSupportValidation.label, "失效");
-const gatedExpired = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "已过期", evidence: "" });
-assert.strictEqual(gatedExpired.action, "watch");
-const gatedEmptyEvidence = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "真实支撑", evidence: "" });
-assert.strictEqual(gatedEmptyEvidence.action, "watch");
-assert.strictEqual(gatedEmptyEvidence.bypassBuyEligible, false);
-assert.strictEqual(gatedEmptyEvidence.score, 86);
-const gatedHumanBuy = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "已验证", evidence: "急跌修复" });
-assert.strictEqual(gatedHumanBuy.action, "buy");
-assert.strictEqual(gatedHumanBuy.actionText, "建议买入");
-assert.strictEqual(gatedHumanBuy.score, 86);
-assert.strictEqual(gatedHumanBuy.model, baseBuy.model);
-assert.strictEqual(gatedHumanBuy.matched, baseBuy.matched);
-assert.strictEqual(gatedHumanBuy.bypassSupportValidation.pathId, "fast_drop_repair");
-assert.strictEqual(gatedHumanBuy.bypassSupportValidation.validationReason, "急跌修复");
-assert.strictEqual(gatedHumanBuy.bypassSupportValidation.participatesInScoring, false);
-assert.ok(gatedHumanBuy.bypassBuyReason.includes("急跌修复"));
-const gatedTightStop = gateContext.applyHumanSupportBuyGate({ ...baseBuy, bypassStopLossPct: 2.5 }, { status: "真实支撑", evidence: "平台突破回踩" });
-assert.strictEqual(gatedTightStop.action, "watch");
-assert.strictEqual(gatedTightStop.score, 86);
-const gatedStopFloor = gateContext.applyHumanSupportBuyGate({ ...baseBuy, bypassStopLossPct: 3, bypassRiskReward: 3 }, { status: "真实支撑", evidence: "平台突破回踩" });
-assert.strictEqual(gatedStopFloor.action, "buy");
-const gatedWideStop = gateContext.applyHumanSupportBuyGate({ ...baseBuy, bypassStopLossPct: 9, bypassRiskReward: 3 }, { status: "真实支撑", evidence: "底部形态" });
-assert.strictEqual(gatedWideStop.action, "watch");
-const gatedLowReward = gateContext.applyHumanSupportBuyGate({ ...baseBuy, bypassRiskReward: 2.9 }, { status: "真实支撑", evidence: "头肩底" });
-assert.strictEqual(gatedLowReward.action, "watch");
-const gatedEdges = gateContext.applyHumanSupportBuyGate({ ...baseBuy, bypassStopLossPct: 8, bypassRiskReward: 3 }, { status: "真实支撑", evidence: "突破回踩" });
-assert.strictEqual(gatedEdges.action, "buy");
-assert.strictEqual(gatedEdges.bypassSupportValidation.pathId, "platform_break_retest");
-assert.strictEqual(gatedEdges.bypassSupportValidation.pathLabel, "平台突破回踩");
-gateContext.currentReplayCandle = () => ({ close: 10 });
-const derivedGeometry = gateContext.applyHumanSupportBuyGate({
-  ...baseBuy,
-  bypassStopLossPct: null,
-  bypassRiskReward: null,
-  stopRiskPct: 5,
-  stopLoss: 9.5,
-  pressurePlan: { price: 13 },
-}, { status: "真实支撑", evidence: "急跌修复" });
-assert.strictEqual(derivedGeometry.action, "buy");
-assert.strictEqual(derivedGeometry.score, 86);
-assert.ok(derivedGeometry.bypassRiskReward >= 3);
-const followBuy = gateContext.applyHumanSupportBuyGate({
-  ...baseBuy,
-  action: "watch",
-  actionText: "建议观望",
-  score: 38,
-  bypassBuyEligible: true,
-  bypassBuyReason: "支撑验证状态：真实支撑。验证原因：系统阳线回踩。",
-  bypassSupportValidation: { status: "validated", label: "真实支撑", validationReason: "系统阳线回踩", pathId: "reclaim_retest_bullish", pathLabel: "跌破后回踩确认" },
-}, { status: "", evidence: "" });
-assert.strictEqual(followBuy.action, "buy");
-assert.strictEqual(followBuy.score, 38);
-assert.strictEqual(followBuy.bypassSupportValidation.validationReason, "系统阳线回踩");
-const followBlocked = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "", evidence: "" });
-assert.strictEqual(followBlocked.action, "watch");
-assert.strictEqual(followBlocked.score, 86);
-assert.strictEqual(followBlocked.bypassSupportValidation.validationReason, "系统原因");
-const sellKept = gateContext.applyHumanSupportBuyGate({
-  ...baseBuy,
-  side: "sell",
-  action: "sell",
-  actionText: "建议卖出",
-}, { status: "真实支撑", evidence: "急跌修复" });
-assert.strictEqual(sellKept.action, "sell");
-assert.strictEqual(sellKept.actionText, "建议卖出");
-assert.strictEqual(sellKept.score, 86);
-assert.ok(!appSource.slice(appSource.indexOf("function ruleLibraryAdvice("), appSource.indexOf("function manualSupportPrice(")).includes("applyHumanSupportBuyGate"));
-assert.ok(!generated.includes("applyHumanSupportBuyGate"));
-assert.ok(!generated.includes("evaluateWeeklyTrendStructure"));
-assert.ok(!generated.includes("weeklyTrendDirection"));
-assert.ok(!generated.includes("replayStructuredAdvice"));
-assert.ok(appSource.includes("function replayUsesServerAdvice("));
-assert.ok(appSource.includes("function replayStructuredAdvice("));
-const historyContext = {
-  replayState: {
-    cursor: 899,
-    data: {
-      timeframes: {
-        daily: Array.from({ length: 900 }, (_, index) => ({ date: `d${index}`, close: index + 1 })),
-      },
-    },
-  },
-};
-require("vm").runInNewContext(
-  `${extractAppFunction(appSource, "replayDailyHistory")}\nthis.replayDailyHistory = replayDailyHistory;`,
-  historyContext,
-);
-const windowed = historyContext.replayDailyHistory();
-assert.strictEqual(windowed.length, 700);
-assert.strictEqual(windowed[0].date, "d200");
-assert.strictEqual(windowed.at(-1).date, "d899");
-const updateStart = appSource.indexOf("function updateReplayUi(");
-const updateEnd = appSource.indexOf("function invalidateReplayServerAdvice(");
-const updateSource = appSource.slice(updateStart, updateEnd);
-assert.ok(updateSource.includes("if (replayUsesServerAdvice()) requestReplayServerAdvice();"));
-assert.ok(!updateSource.includes("\n  requestReplayServerAdvice();\n"));
 
 console.log("structure recognition checks passed");
 console.log(JSON.stringify({
