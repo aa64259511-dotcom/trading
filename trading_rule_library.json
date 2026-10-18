@@ -1,6 +1,6 @@
 {
-  "version": "2.1",
-  "updatedAt": "2026-06-17",
+  "version": "2.7",
+  "updatedAt": "2026-10-18",
   "source": {
     "tradeFile": "trade_replay_samples.jsonl",
     "levelFile": "level_training_samples.jsonl",
@@ -177,6 +177,18 @@
       "rule": "若当前仍低于 MA60 或 MA120，且近120日/更长周期回撤较大，即使短线 MA5、MA10、MA20 修复，也不能判定为上升趋势大调整；应判定为“长期下跌后尝试趋势扭转”或“急跌后修复观察”。"
     },
     {
+      "id": "long_downtrend_not_fast_drop_first_bottom_no_buy",
+      "title": "长期下跌不按急跌模型第一次买入。",
+      "evidence": "人工规则更新：急跌模型要求短期快速下跌后的修复；长期下跌趋势的底部修复属于筑底，不是第一次拉回就买。",
+      "rule": "若股价处在长期下跌趋势中（仍受 MA60/MA120 压制，或120日/更长周期回撤较大），不能直接套用急跌后修复模型。第一次跌破拉回、连续小阳或站回 MA20 只能视为底部尝试，AI 最高输出观望。必须等趋势走平（MA20/MA60 下行明显收敛或短均线重新多头），再出现二次回踩不破、支撑跌破后快速拉回或小平台确认，才能进入买入判断。若底部区域已经出现至少两次有效验证，且当前重新站上 MA20、MA5 上穿 MA10 并突破最近短期高点，则不再按第一次底部处理，可升级为多次确认买点。"
+    },
+    {
+      "id": "prior_up_fast_drop_first_rebound_needs_two_validations",
+      "title": "After a prior up wave and fast drop, the first rebound needs two validations.",
+      "evidence": "Manual rule update: distinguish a clean long-downtrend bottom reclaim from a first rebound after a completed prior up wave and sharp decline.",
+      "rule": "If the stock gained about 18% or more in the prior 60 trading days and then dropped about 12% or more from the swing high, treat the current move as a first rebound after a prior up wave. Do not buy on the first rebound alone. Require at least two structural validations, such as support pierce-and-reclaim, later retest holding support, shrinking-volume platform, or another bullish confirmation. After two validations, still check MA5, minor trend, 3%-8% stop risk, support distance, and about 3R upside."
+    },
+    {
       "id": "below_ma5_no_buy",
       "title": "收盘价低于5日线时，不给买入建议。",
       "evidence": "本次人工规则更新：5日线作为短线强弱过滤器，价格低于5日线说明短线仍未重新转强，即使出现支撑拉回、急跌修复或盈亏比满足，也只能观察。",
@@ -201,6 +213,18 @@
       "rule": "接近压力、单日跌破5日线只标记为卖出预警；同时出现压力位转弱、上引线/阴线、跌破买入依据、跌破移动止盈或强转弱，才升级为卖出。"
     },
     {
+      "id": "pressure_failure_below_ma5_is_sell",
+      "title": "压力失败并跌破5日线时执行卖出。",
+      "evidence": "压力触及或突破后未能站稳，随后趋势转弱并收盘跌破5日线，属于突破失败后的趋势破坏。",
+      "rule": "价格曾经打到买入价上方的有效压力但没有突破，或突破后重新跌回该有效压力下方；买入价下方的旧压力、原支撑或转化线不参与上方压力失败判断，近端压力也不参与判断。如果同时收盘跌破5日线，建议卖出。该条件不受持仓期间是否达到3R以上的止盈门槛限制；达到3R时按止盈执行，未达到3R时按趋势破坏卖出。"
+    },
+    {
+      "id": "body_break_reclaim_bottom_fractal",
+      "title": "实体跌破后快速拉回只是候选，底分型确认后才买入。",
+      "evidence": "实体收盘有效跌破支撑后，快速阳线拉回可能只是技术性反抽；需要后续低点保护和局部高点突破，才能确认底部结构。",
+      "rule": "实体跌破支撑后出现阳线快速拉回，只记为跌破拉回候选结构，不直接买入。拉回可以跨越多个交易日，不要求次日完成；后续必须低点不再有效下移或低点抬高，并收盘突破拉回阶段的局部反弹高点，形成小底分型后才允许评估买入。后续K线不要求连续阳线，可以出现十字星、小阴线或窄幅震荡；若再次收盘跌回支撑下方或继续创新低，候选结构失效。"
+    },
+    {
       "id": "bottom_area_profit_taking_is_special",
       "title": "底部反弹不能完全按趋势止盈处理。",
       "evidence": "002017 2018-11-20 的卖出理由明确写到“跌破5日线，底部区域不能做趋势止盈”。",
@@ -217,6 +241,18 @@
       "title": "急跌后可博弈修复，上方压力远时可以调整为买入。",
       "evidence": "300422 在 2024-02-19 属于急跌后两根阳线修复，收盘重新站上5日线，且若上方压力距离较远，当前更像反弹修复试错，而不是继续机械观望。",
       "rule": "前期急跌后，若连续阳线快速拉回、收盘站上5日线，小趋势开始转上，并且上方压力距离当前价约12%以上或按止损测算盈亏比达到3R以上，可以输出建议买入；止损向前寻找结构依据，参考支撑、密集交易区上下沿、拉回K线实体下沿或最低价，且空间控制在3%-8%。"
+    },
+    {
+      "id": "trend_continuation_requires_structure_confirmation",
+      "title": "Trend continuation entries require a two-step buy structure.",
+      "evidence": "600382 on 2016-06-23: support 6.51 was pierced and reclaimed on 2016-06-22, then price retested support at 6.57 on shrinking volume without breaking it.",
+      "rule": "In an uptrend, do not buy solely because moving averages are bullish, price is near support, or risk/reward is attractive. Require an ordered structure such as support pierce-and-reclaim followed by a retest that holds support, preferably with shrinking volume, or a breakout followed by a successful retest. Only after the two validations may the setup enter the buy decision."
+    },
+    {
+      "id": "bearish_retest_candle_and_weekly_downtrend_block_continuation_buy",
+      "title": "A shrinking-volume bearish retest is not a buy confirmation in a weekly downtrend.",
+      "evidence": "300192 on 2018-05-25 held support 10.27 on lower volume, but fell from 11.16 to 10.47 and closed near the session low while the weekly trend remained down.",
+      "rule": "Do not treat shrinking volume alone as confirmation. If the confirmation candle falls about 3% or more from open to close and closes in the lower 35% of its range, force observe. In a weekly downtrend, ordinary trend-continuation setups are also blocked; only a confirmed acute-drop rebound or a completed base breakout with retest may buy."
     },
     {
       "id": "support_reclaim_needs_space_and_retest",
@@ -259,8 +295,245 @@
       "title": "压力被收盘突破后，画线角色自动转为支撑。",
       "evidence": "人工规则更新：当价格从压力线下方收盘突破到上方后，该压力线不再继续作为上方压力参与盈亏比测算，应自动迁移为下方支撑。",
       "rule": "系统层面：非支撑角色的线（近端压力、有效压力、突破目标）若被收盘价向上突破，自动改为支撑并记录“突破后转支撑”。交易层面：压力转支撑后，买入仍需看回踩不破、缩量企稳、小阳线确认、MA5和止损/盈亏比，不因角色转支撑而直接追高。"
+    },
+    {
+      "id": "uptrend_acute_drop_wait_for_stability",
+      "title": "上涨趋势出现急跌先规避，等待企稳后再考虑买点。",
+      "evidence": "603901 在 2026-03-06 属于原上涨结构中急跌后的初步修复；仅凭连续小阳、远端压力和高盈亏比不应直接买入。",
+      "rule": "上涨趋势中若出现急跌或大阴线破坏短线结构，先按风险释放阶段处理；必须等待缩量企稳、回踩不破、小平台成型或支撑确认K线后，再重新计算止损和盈亏比。未企稳前即使远端压力空间满足3R，也最高输出观察。"
+    },
+    {
+      "id": "no_resistance_structure_only_buy",
+      "title": "上方没有压力线时，只判断买入结构，不用盈亏比拦截。",
+      "evidence": "人工规则更新：未画出上方压力不等于压力很远，也不应强制补压力；这种情况下盈亏比暂不计算，买点只看结构是否成立和止损是否合理。",
+      "rule": "当上方没有有效压力线时，AI 建议不再因为缺少压力或无法计算3R而降级；只按买入结构判断，包括阶段、支撑确认、5日线、小趋势、缩量企稳、止损空间3%-8%。若结构成立且止损合理，可以建议买入；若后续补出压力线，再重新评估盈亏比。"
+    },
+    {
+      "id": "support_high_volume_no_buy",
+      "title": "支撑附近放量过大不买入。",
+      "evidence": "300449 在 2024-10-29 的人工规则更新：价格接近支撑 7.60 时，如果量放得过大，说明抛压未释放完，不能直接当作支撑确认买点。",
+      "rule": "支撑位买入要看量能：回踩支撑时缩量优先；若触及或跌破支撑时成交量明显放大，尤其超过近20日均量约1.5倍且不是强阳线，或超过2倍，AI 应降为观望。必须等后续缩量企稳、回踩不破或再次小阳线确认后再评估买入。"
+    },
+    {
+      "id": "pullback_process_shrunk_bullish_volume_confirm",
+      "title": "回踩过程已经缩量时，确认阳线允许适度放量。",
+      "evidence": "600581 在 2016-11-09：支撑 2.67 附近的跌破拉回和回踩过程曾持续缩量，确认日收阳站回支撑上方，成交量约为20日均量1.79倍。",
+      "rule": "缩量确认看整个跌破拉回和回踩过程，不机械要求确认日自身缩量。若确认前的回踩阶段均量已经低于此前基准阶段，确认日收阳并站回支撑上方，成交量低于近20日均量约2倍，则允许以适度放量阳线完成确认。确认信息必须显示‘过程曾缩量’和确认日量比，不得错误显示‘缺少缩量企稳’。"
+    },
+    {
+      "id": "downtrend_rebound_requires_support_pierce_reclaim",
+      "title": "下跌趋势反弹必须先打穿支撑再快速拉回。",
+      "evidence": "人工规则更新：下跌趋势中的反弹不能只因为靠近支撑、缩量小阳、止损空间合理就买；必须先打穿关键支撑后快速收回，证明空头向下打不动。",
+      "rule": "下跌趋势或弱势结构中的反弹买点，必须先出现打穿/跌破关键支撑，随后快速拉回并重新站上支撑。没有打穿支撑再拉回时，即使出现平台不破、连续小阳、缩量或盈亏比满足，也最高输出观察；后续还要看站稳支撑上方、缩量企稳或再次小阳确认。"
+    },
+    {
+      "id": "composite_reclaim_second_pierce_bullish_confirm",
+      "title": "复合跌破拉回中，踩稳确认阶段的二次跌破拉回阳线可以买入。",
+      "evidence": "002255 在 2016-10-18 属于复合结构：前面已有跌破支撑后的拉回背景，当前回踩确认过程中再次刺破 7.70 支撑后收阳拉回，可视为二次确认。",
+      "rule": "若此前已经出现过跌破支撑后的拉回背景，随后进入支撑上方的回踩/踩稳确认阶段；当前K线再次盘中跌破或刺破支撑，收盘重新站回支撑上方并收阳，则这根K线可视为复合结构的二次确认买点。此时可放宽“拉回必须超过2.5%空间”的机械要求，但仍需满足收盘不低于5日线、止损空间合理、压力/结构空间不过分受限。"
+    },
+    {
+      "id": "breakout_pullback_composite_reclaim_confirm",
+      "title": "突破回踩确认中，回踩支撑出现跌破拉回阳线可以买入。",
+      "evidence": "人工规则更新：这是突破回踩确认的复合结构。先突破，后回踩转化支撑；回踩支撑时又出现跌破拉回阳线，说明支撑被再次测试后收回，可作为买入确认。",
+      "rule": "突破交易密集区、平台上沿或压力位后，原压力转为支撑；回踩确认过程中，如果盘中跌破或刺破该支撑，但收盘重新站回支撑上方并收阳，则这根K线可视为“突破回踩确认 + 跌破拉回”的复合确认。该结构可以归入交易密集区突破后回踩确认模型，不必机械要求普通缩量回踩；但仍需满足小趋势不弱、止损空间合理、上方压力或突破目标空间不过分受限。"
+    },
+    {
+      "id": "breakout_pullback_shrunk_then_bullish_confirm",
+      "title": "突破回踩已缩量后，当日阳线站回支撑可作为确认。",
+      "evidence": "601868 在 2025-07-18 属于突破回踩后的复合确认：前面回踩支撑过程已经缩量，当前阳线重新站回支撑上方，且量能没有超过近20日均量约1.5倍。",
+      "rule": "突破后的回踩确认要看整个回踩过程，而不是只看确认当天。若回踩阶段已经缩量，当前K线收阳并重新站回转化支撑上方，且确认当天成交量没有明显过大（约不超过近20日均量1.5倍），可视为突破回踩确认K线。"
+    },
+    {
+      "id": "support_reclaim_multi_day_hold_break_short_high",
+      "title": "Support reclaim with multi-day hold and short-high confirmation can be a buy signal.",
+      "evidence": "603066 on 2024-09-26: after piercing support near 9.32, price held back above support for multiple days, closed bullish near/above the recent 10-day high, volume was not excessive, stop risk and RR were valid.",
+      "rule": "After support is pierced, if price holds back above the support zone for at least two trading days, the current candle is bullish, closes at least about 2% above support, confirms the recent 10-day high area, and volume is not above about 1.5x the 20-day average, this can count as support reclaim confirmation. It can upgrade a range/support reclaim model to buy when stop risk is 3%-8% and upside is about 3R or more."
+    },
+    {
+      "id": "all_buy_models_require_bullish_realtime_confirmation",
+      "title": "所有买入模型必须使用当前K线阳线确认。",
+      "evidence": "002466 在 2026-08-11 需要根据QMT当前实时K线结构判断，不能因为日线尚未收盘而拒绝生成建议。",
+      "rule": "所有买入模型的确认K线必须满足当前价或收盘价高于开盘价。阴线和平盘不能建议买入；当日K线尚未收盘时允许使用QMT实时K线给出实时建议。后端应优先使用网页传入的当前K线历史，不得退回上一交易日覆盖实时结构。"
+    },
+    {
+      "id": "ma5_is_score_penalty_not_hard_filter",
+      "title": "5日线只作为扣分项，不单独否决买入。",
+      "evidence": "603650 在 2026-08-14 收盘64.51，5日线约64.522，仅低约0.019%；阳线、支撑确认、缩量、止损和盈亏比均成立，不应因极小差值从买入变为观望。",
+      "rule": "收盘低于5日线时扣8分并在交易计划中披露，但不得将其写入缺失条件或单独强制观望。短线结构应根据均线方向、连续阳线、支撑跌破拉回、回踩确认和突破结构综合判断。"
+    },
+    {
+      "id": "resistance_needs_retest_before_support",
+      "title": "突破压力后必须回踩确认才转为正式支撑。",
+      "evidence": "规则区分：上升趋势中的原始承接位可直接作为支撑；压力突破后的价位必须经过后续回踩收稳，避免把突破当日直接当作支撑。",
+      "rule": "上升趋势中价格下方的原始承接位直接标记为 support；压力向上突破后先标记 pending_support，不纳入正式支撑选择。后续回踩到该价位附近并收阳站稳后才转为 support；若收盘跌回下方，则候选支撑失效并转为 effective_resistance。"
     }
   ],
+  "trendStructureRules": {
+    "id": "weekly_trend_structure",
+    "label": "周线趋势结构判定（盘整 / 上涨 / 下跌）",
+    "status": "draft_bypass",
+    "participatesInScoring": false,
+    "note": "第一步结构判定。先以旁路方式运行，不改写现有阶段与评分权重；原6个结构阶段降为本判定下的子阶段。",
+    "timeframe": "weekly",
+    "noFutureData": "只使用分析日之前已收盘的周K线。",
+    "decisionOrder": [
+      "1. 在周线上画出当前有效支撑区与压力区",
+      "2. 先判盘整：区间内拐头次数与区间跨度",
+      "3. 非盘整：先看是否有效突破/跌破区间，有则直接定方向",
+      "4. 无突破/跌破：看周线高低点序列；拐头次数不足时参考进区间前走势",
+      "5. 用周线均线、波段幅度对比、回调/反弹深度打强弱",
+      "6. 用回撤幅度与趋势持续周数标子阶段"
+    ],
+    "levelDrawing": {
+      "swingPivot": "周线波段高低点，左右各2周确认",
+      "validatedLevel": "被触碰2次及以上的价位视为已验证支撑/压力"
+    },
+    "rangeSpan": {
+      "formula": "跨度 = (压力位 - 支撑位) / 支撑位",
+      "minSpanPct": 8,
+      "maxSpanPct": 50,
+      "outOfRangeNote": "跨度低于8%视为窄幅横盘，不按区间盘整判定；高于50%视为大级别波段，需要拆分看。"
+    },
+    "boundaryTolerance": {
+      "nearBoundary": {
+        "spanRatio": 0.2,
+        "minPct": 3,
+        "maxPct": 8,
+        "meaning": "拐头点距边界在跨度20%以内算接近边界"
+      },
+      "overshoot": {
+        "spanRatio": 0.1,
+        "minPct": 1.5,
+        "maxPct": 5,
+        "meaning": "拐头点超出边界不到跨度10%，仍算区间内拐头"
+      },
+      "effectiveBreak": {
+        "spanRatio": 0.15,
+        "holdWeeks": 2,
+        "meaning": "周收盘超出边界达到跨度15%并站稳2周，算有效突破或跌破"
+      }
+    },
+    "classes": [
+      {
+        "id": "range",
+        "label": "盘整结构",
+        "priority": 1,
+        "conditions": [
+          "价格在周线支撑与压力区间内来回波动：涨到上沿附近拐头向下，跌到下沿附近拐头向上",
+          "拐头点可以略超边界（overshoot 容差内），也可以未完全到达边界（nearBoundary 容差内）",
+          "只在区间中部的小波动不计入拐头",
+          "上沿拐头与下沿拐头交替累计达到3次及以上（上下波动超过2次）判为盘整",
+          "区间跨度在 minSpanPct 与 maxSpanPct 之间"
+        ],
+        "minTurns": 3,
+        "contextTag": "记录进区间前的走势：上涨后进入标为高位盘整，下跌后进入标为低位盘整",
+        "priorTrendLookbackWeeks": 15
+      },
+      {
+        "id": "up",
+        "label": "上涨结构",
+        "conditions": [
+          "向上有效突破周线压力（effectiveBreak）",
+          "或周线高点与低点同时抬高",
+          "或拐头次数不足盘整标准，且进区间前为上涨走势"
+        ],
+        "confirmation": "突破后回踩原压力不破、压力转支撑，确认上涨"
+      },
+      {
+        "id": "down",
+        "label": "下跌结构",
+        "conditions": [
+          "向下有效跌破周线支撑且未能收回（effectiveBreak）",
+          "或周线高点与低点同时降低",
+          "或拐头次数不足盘整标准，且进区间前为下跌走势"
+        ],
+        "confirmation": "跌破后反抽原支撑过不去、支撑转压力，确认下跌"
+      }
+    ],
+    "factors": {
+      "primary": [
+        {
+          "id": "weekly_swing_sequence",
+          "label": "周线高低点序列",
+          "rule": "高点、低点都抬高为上涨；都降低为下跌",
+          "existingCode": "已有日线高低点（higherLows/lowerHighs），需改为周线"
+        },
+        {
+          "id": "weekly_range_break",
+          "label": "周线区间突破/跌破",
+          "rule": "按 effectiveBreak 判定，出现即直接定方向",
+          "existingCode": "无，需新增"
+        },
+        {
+          "id": "break_retest",
+          "label": "突破后回踩 / 跌破后反抽",
+          "rule": "压力转支撑确认上涨；支撑转压力确认下跌",
+          "existingCode": "已有“突破后待回踩确认”状态"
+        }
+      ],
+      "secondary": [
+        {
+          "id": "weekly_ma",
+          "label": "周线均线",
+          "rule": "收盘价与周MA10、周MA30的位置关系及周MA10方向，只用于确认强弱",
+          "existingCode": "已有 weeklyMa10/weeklyMa30"
+        },
+        {
+          "id": "wave_amplitude",
+          "label": "波段幅度对比",
+          "rule": "上涨中上涨波段长于回调波段；下跌中反弹弱于下跌",
+          "existingCode": "无，需新增"
+        },
+        {
+          "id": "pullback_depth",
+          "label": "回调/反弹深度",
+          "rule": "上涨中回调不破前低；下跌中反弹不过前高（与高低点序列合并使用）",
+          "existingCode": "部分已有"
+        }
+      ],
+      "context": [
+        {
+          "id": "drawdown",
+          "label": "高点回撤幅度",
+          "rule": "区分下跌中与下跌末段，只标子阶段，不定方向",
+          "existingCode": "已有 120日/250日回撤"
+        },
+        {
+          "id": "trend_duration",
+          "label": "趋势持续周数",
+          "rule": "区分趋势初期与后期",
+          "existingCode": "无，需新增"
+        }
+      ]
+    },
+    "conflictRule": "结构因子与均线因子冲突时以结构为准，并降低强度标签（如高点抬高但仍在周MA30下方，判为弱上涨，不判为下跌）。",
+    "strengthLabels": [
+      "强上涨",
+      "弱上涨",
+      "盘整",
+      "弱下跌",
+      "强下跌"
+    ],
+    "subStageMapping": {
+      "up": [
+        "uptrend_pullback",
+        "uptrend_deep_pullback"
+      ],
+      "down": [
+        "long_downtrend_reversal_attempt",
+        "weak_rebound",
+        "fast_drop_repair"
+      ],
+      "range": [
+        "range"
+      ],
+      "note": "fast_drop_repair 若发生在周线上涨结构中，可归入上涨下的急跌调整，按实际周线结构确定。"
+    },
+    "dailyMaRole": "日线 MA5/MA10/MA20 不再参与大结构判定，仅用于买点、止损等细节。",
+    "autoUpdate": true,
+    "autoUpdateRule": "趋势方向与阶段随分析日自动重算，跟随走势变化。"
+  },
   "stageRules": [
     {
       "id": "long_downtrend_reversal_attempt",
@@ -353,10 +626,13 @@
         "买入后容易快速触发止损",
         "即使短线 MA5/MA10/MA20 修复，只要仍低于 MA60/MA120，就不能按上升趋势处理"
       ],
-      "tradeBias": "只做超跌反弹，不做趋势仓；止损更近，预期更低。",
+      "tradeBias": "只观察打穿关键支撑后的快速拉回反弹；没有跌破支撑再收回时，不因靠近支撑或缩量小阳直接买入。",
       "preferredModels": [
         "fast_drop_repair_platform",
         "bottom_pattern_reversal"
+      ],
+      "requirements": [
+        "打穿/跌破关键支撑后快速拉回并重新站上支撑"
       ]
     }
   ],
@@ -436,7 +712,9 @@
         "震仓K线低点",
         "若止损过大则改用开盘价/实体边界控制风险",
         "回踩确认K线实体下沿"
-      ]
+      ],
+      "status": "path_label_only",
+      "note": "v2.3起并入 buySupportValidation 路径标签，不再单独作为买入打分模型。"
     },
     {
       "id": "fast_drop_repair_platform",
@@ -490,7 +768,9 @@
         "上方压力很近且盈亏比不足3R",
         "止损距离过大",
         "止损空间低于3%，止损过紧，容易被普通波动触发"
-      ]
+      ],
+      "status": "path_label_only",
+      "note": "v2.3起并入 buySupportValidation 路径标签，不再单独作为买入打分模型。"
     },
     {
       "id": "bottom_pattern_reversal",
@@ -515,7 +795,9 @@
       ],
       "downgradeToWatch": [
         "收盘价低于5日线"
-      ]
+      ],
+      "status": "path_label_only",
+      "note": "v2.3起并入 buySupportValidation 路径标签，不再单独作为买入打分模型。"
     },
     {
       "id": "platform_breakout",
@@ -542,7 +824,9 @@
       ],
       "downgradeToWatch": [
         "收盘价低于5日线"
-      ]
+      ],
+      "status": "path_label_only",
+      "note": "v2.3起并入 buySupportValidation 路径标签，不再单独作为买入打分模型。"
     }
   ],
   "sellRules": [
@@ -577,6 +861,7 @@
         "持仓期间最高盈利曾经达到或超过初始风险的3倍（曾到3R）",
         "达到过3R后出现趋势转弱",
         "跌破5日线或移动止盈位",
+        "持仓期间已经打到有效压力，但后续没有继续突破，并且收盘跌破5日线",
         "接近压力后压力失败、上影线、阴线、冲高回落或放量滞涨",
         "反弹仓到达目标区后转弱"
       ],
@@ -618,7 +903,7 @@
     {
       "id": "pressure_take_profit",
       "label": "压力位止盈/减仓",
-      "rule": "打到上方压力后，如果出现阴线、上引线、无法继续突破或跌破5日线，应优先兑现；300809、920522、688217 新样本强化了这个规则。"
+      "rule": "打到上方压力后，如果出现阴线、上引线、无法继续突破或跌破5日线，应优先兑现；600346 2018-08-03 强化了持仓期间触及有效压力后，上不去且跌破5日线应按移动止盈执行；300809、920522、688217 新样本强化了这个规则。"
     }
   ],
   "riskReward": {
@@ -636,24 +921,12 @@
   },
   "scoringAdjustments": [
     {
-      "rule": "fast reclaim two-up buy trigger",
-      "adjustment": "急跌后连续两根阳线快速拉回并站上5日线时，连续阳线本身可作为修复确认；不再因缺少完整平台或压力线直接降为观察。"
-    },
-    {
-      "rule": "000958 2024-02-07 fast reclaim case",
-      "adjustment": "急跌后两根阳线快速收回、收盘站上MA5时，应进入买入建议判断；若同时有支撑/压力线和止损盈亏比支持，可输出建议买入。"
-    },
-    {
       "rule": "take profit uses ever reached 3R",
       "adjustment": "止盈判断使用持仓期间最高R倍数：只要曾经达到或超过3R，后续趋势转弱即可进入止盈；不要求当前R仍然大于3。"
     },
     {
       "rule": "minor uptrend buy filter",
       "adjustment": "买入模型必须先通过小趋势向上过滤；收盘低于5日线时只能观察。若收盘站上5日线，且出现连续阳线、跌破拉回或突破站稳，可视作小趋势开始向上，不必机械等待 MA5 完全上穿 MA10。"
-    },
-    {
-      "rule": "dense zone pullback confirmation",
-      "adjustment": "平台/交易密集区突破不直接追买；突破后缩量回踩不破，并再次出现小阳线，才提高为高质量买点。"
     },
     {
       "rule": "sell decision type priority",
@@ -664,20 +937,8 @@
       "adjustment": "持仓且已有有效止损时，若未触发止损且浮盈不足3R，卖出模型只能输出继续持有/等待，不能输出建议卖出。"
     },
     {
-      "rule": "long downtrend repair stage priority",
-      "adjustment": "当价格仍低于 MA60/MA120 且中长期跌幅较大时，短线均线多头排列不能把阶段升级为“上升趋势中的大调整”；应优先输出“长期下跌后尝试趋势扭转”。"
-    },
-    {
       "rule": "below MA5 buy filter",
       "adjustment": "只要当前收盘价低于5日线，所有买入模型最高只能输出观察，不能输出建议买入；计划提示等待重新站上5日线。"
-    },
-    {
-      "rule": "AI buy score >= 90 but only because of支撑拉回",
-      "adjustment": "如果没有平台/形态/连续阳线确认，动作从买入降为观察，计划写“等待下一根站稳或回踩不破”。"
-    },
-    {
-      "rule": "manual buy while AI watch",
-      "adjustment": "若人工理由包含急跌修复、小平台突破、W底、头肩底、震仓拉回、突破买入，应提高对应模型分并生成条件化买入计划。"
     },
     {
       "rule": "AI sell triggered by near pressure or below MA5 only",
@@ -692,16 +953,38 @@
       "adjustment": "降低影线/摆动点权重，提高实体密集区和平台边界权重。"
     },
     {
-      "rule": "fast drop repair with far resistance",
-      "adjustment": "急跌后连续阳线站上5日线，且上方压力距离约12%以上或盈亏比达到3R以上时，提高急跌修复模型分数，可直接给建议买入；压力近或止损远时仍降为观察。"
+      "rule": "buy hard block far support wide stop",
+      "adjustment": "若当前价距离支撑超过8%或止损空间超过8%，买入模型分数强制压到观察区，不允许输出建议买入；缺少上方压力线时不再硬拦截，只是不计算固定盈亏比。"
     },
     {
-      "rule": "support reclaim without space or retest",
-      "adjustment": "跌破支撑后若只是略微收回支撑上方，降低模型分；未出现二次回踩确认/小平台/缩量企稳时，默认观望，不直接建议买入。"
+      "rule": "uptrend acute drop needs stability",
+      "adjustment": "上涨趋势出现急跌时先规避，未出现缩量企稳、回踩不破、小平台或支撑确认K线前，急跌修复模型分数强制压到观察区，不允许仅因远端压力空间或3R盈亏比输出建议买入。"
     },
     {
-      "rule": "buy hard block far support wide stop missing resistance",
-      "adjustment": "若当前价距离支撑超过8%、止损空间超过8%、或缺少上方压力线，买入模型分数强制压到观察区，不允许输出建议买入。"
+      "rule": "missing resistance uses structure only",
+      "adjustment": "上方没有压力线时，不再把缺少压力作为买入硬拦截；盈亏比字段可为空，模型只按结构确认和止损空间评分。"
+    },
+    {
+      "rule": "support high volume no buy",
+      "adjustment": "支撑附近若成交量放大到近20日均量约1.5倍以上且不是强阳线，或超过2倍，支撑验证买入模型强制压到观察区；等缩量企稳或回踩不破再评估。"
+    },
+    {
+      "rule": "downtrend rebound requires support pierce reclaim",
+      "adjustment": "下跌趋势/弱势反弹模型必须要求打穿关键支撑后快速拉回；若只是靠近支撑、平台不破或连续小阳，模型分数强制压到观察区。"
+    },
+    {
+      "rule": "long downtrend first bottom no buy",
+      "adjustment": "长期下跌趋势不归入短期急跌修复模型；第一次底部拉回或短线修复强制压到观察区，必须等趋势走平后的二次回踩不破、跌破拉回或小平台确认后才允许进入买入评分。"
+    },
+    {
+      "rule": "prior up then fast drop first rebound needs two validations",
+      "adjustment": "If the prior 60 trading days contain an up wave of about 18% or more followed by a drop of about 12% or more from the swing high, cap the first rebound at watch. Buy models need at least two structural validations before their score can enter the buy zone."
+    },
+    {
+      "id": "sell_score_link_weekly_trend",
+      "label": "卖出评分关联周线趋势",
+      "rule": "卖出主逻辑不改。下跌：打到压力卖出分提高。上涨：接近压力单独卖出分降低，加速后或跌破上涨趋势后提高。盘整：上沿兑现分提高；快速突破后若有效回到区间（收盘低于上沿达跨度20%，限定2%–6%）按假突破提高卖出分，若站稳区间外转上涨偏好。",
+      "status": "draft_bypass"
     }
   ],
   "examples": {
@@ -1320,7 +1603,8 @@
           "回踩后再次出现小阳线确认",
           "止损可放在回踩平台下沿或小阳线实体下沿"
         ]
-      }
+      },
+      "突破交易密集区后回踩转化支撑，回踩中跌破/刺破支撑后收阳拉回"
     ],
     "downgradeToWatch": [
       "小趋势尚未向上",
@@ -1334,9 +1618,11 @@
       "距离支撑超过8%",
       "止损空间超过8%",
       "止损空间低于3%，止损过紧，容易被普通波动触发",
-      "缺少上方压力线，不能确认3R空间",
       "连续大阳加速后远离支撑/突破位",
-      "确认K线已成立但仍机械等下一根，导致盈亏比从合格变成不合格"
+      "确认K线已成立但仍机械等下一根，导致盈亏比从合格变成不合格",
+      "上涨趋势刚出现急跌，尚未缩量企稳、回踩不破或形成小平台",
+      "支撑附近放量过大，抛压未释放完",
+      "下跌趋势反弹没有先打穿支撑再快速拉回"
     ],
     "fastReclaimBuyRule": {
       "label": "急跌后连续阳线快速拉回买入",
@@ -1345,14 +1631,22 @@
         "连续两根阳线快速拉回",
         "收盘重新站上5日线",
         "小趋势开始转上",
-        "止损向前寻找结构依据，参考拉回K线实体下沿或最低价"
+        "止损向前寻找结构依据，参考拉回K线实体下沿或最低价",
+        "支撑附近回踩尽量缩量；放量过大时需要等后续企稳确认",
+        "下跌趋势里的反弹必须先打穿关键支撑再拉回；没有打穿支撑时只观察",
+        "复合结构中，已有跌破拉回背景后的踩稳确认阶段，若再次刺破支撑并收阳拉回，可视为二次确认买点"
       ],
       "notRequiredAsHardBlock": [
         "MA5 必须已经完全上穿 MA10",
         "必须已经形成完整小平台",
         "必须先画出明确压力线"
       ],
-      "example": "000958 2024-02-07"
+      "example": "000958 2024-02-07",
+      "notes": [
+        "二次拉回阳线本身可替代拉出2.5%以上空间的机械要求，但仍需看5日线、止损空间和上方结构。",
+        "突破回踩确认阶段的跌破拉回阳线，属于突破回踩 + 支撑拉回的复合确认，可纳入交易密集区突破后回踩确认模型。",
+        "突破回踩已缩量后，当日阳线重新站回支撑上方可作为确认；不机械要求确认当天继续缩量。"
+      ]
     },
     "fastDropRepairSpeculationBuyRule": {
       "label": "急跌后博弈修复，上方压力远可买入",
@@ -1363,12 +1657,13 @@
         "MA5 未完全上穿 MA10 时不机械拦截，连续阳线可视作小趋势开始转上",
         "上方压力距离当前价约12%以上，或按当前止损测算盈亏比达到3R以上",
         "止损向前寻找结构依据：支撑、密集交易区上下沿、拉回K线低点/实体下沿或小平台上下沿",
-        "必须画出上方压力线，不能把缺少压力线当作压力很远",
         "当前价距离支撑不超过8%",
         "止损空间在3%-8%之间",
         "连续阳线快速拉回、突破确认、或支撑踩稳确认K线，三者满足其一即可作为修复确认",
         "支撑踩稳确认K线要求低点触及/接近支撑，收盘拉回支撑上方并收阳，且收盘不低于5日线",
-        "若当前支撑确认K线已成立且尚有约3R空间，不机械等下一根阳线，因为等待可能破坏盈亏比"
+        "若当前支撑确认K线已成立且尚有约3R空间，不机械等下一根阳线，因为等待可能破坏盈亏比",
+        "上涨趋势出现急跌后，必须额外等待缩量企稳、回踩不破、小平台成型或支撑确认K线，不能只凭第一段修复和远端压力空间买入",
+        "若上方没有压力线，暂不计算盈亏比，只按买入结构和3%-8%止损空间判断；后续补压力后再复核盈亏比"
       ],
       "action": "满足以上条件时允许输出建议买入，但按反弹仓/试错仓管理。",
       "downgradeToWatch": [
@@ -1376,12 +1671,12 @@
         "只有单根拉回，缺少连续阳线或站稳迹象",
         "上方压力很近且盈亏比不足3R",
         "止损距离过大，无法控制失败成本",
-        "缺少上方压力线",
         "距离支撑超过8%",
         "按当前防守位测算止损空间超过8%",
         "连续大阳加速后已经明显远离支撑/突破位",
         "单根K线未触及有效支撑、未收阳或仍低于5日线",
-        "支撑确认K线成立但止损空间/压力空间不满足"
+        "支撑确认K线成立但止损空间/压力空间不满足",
+        "上涨趋势刚急跌后只有初步修复，尚未企稳确认"
       ],
       "example": "300422 2024-02-19"
     },
@@ -1420,16 +1715,28 @@
         },
         {
           "id": "missing_resistance",
-          "rule": "缺少上方压力线时，不能默认压力很远，也不能用“无压力”绕过盈亏比。",
-          "action": "先补充上方压力线，确认至少约3R空间后再评估。"
+          "rule": "上方没有压力线时，暂不计算盈亏比，不作为买入硬拦截。",
+          "action": "只按买入结构和止损空间判断；后续补压力后再复核。"
         },
         {
           "id": "accelerated_breakout_wait_retest",
           "rule": "连续大阳或跳空加速突破后，若已经明显远离支撑/突破位，优先等待回踩确认，不直接追买。",
           "action": "等待回踩突破位不破、缩量回踩或新平台形成。"
+        },
+        {
+          "id": "surge_breaks_pressure_wait_retest",
+          "rule": "连续大涨直接突破上方压力/突破位时，即使收盘强势站上，也不能把突破当天直接作为买点。",
+          "action": "必须等待后续回踩突破位不破、缩量企稳或新平台成型后，再重新评估买入。"
         }
       ],
-      "example": "605058 2025-06-30：支撑 26.34，收盘 30.56，距离支撑和止损空间均过大，应观望等待回踩。"
+      "example": "605058 2025-06-30：支撑 26.34，收盘 30.56，距离支撑和止损空间均过大，应观望等待回踩。",
+      "items": [
+        {
+          "id": "support_high_volume",
+          "rule": "价格触及或接近有效支撑时，成交量超过近20日均量约1.5倍且不是强阳线，或超过2倍，不允许建议买入。",
+          "action": "等待后续缩量企稳、回踩不破或再次小阳线确认。"
+        }
+      ]
     },
     "stopLossRange": {
       "label": "买入止损空间",
@@ -1483,14 +1790,381 @@
         "只为了让盈亏比好看才跳到更远压力"
       ],
       "display": "AI建议需展示近端压力、有效压力、突破目标、采用口径和失败条件。",
-    "afterBreakoutRoleMigration": "收盘突破近端压力、有效压力或突破目标后，该线自动转为支撑；普通买点的上方目标必须重新寻找更高一层压力，不能继续把已突破的线当作压力。",
-    "buyStillRequiresAfterMigration": [
-      "回踩或整理不跌破转化后的支撑",
-      "回踩过程尽量缩量",
-      "再次出现小阳线或确认K线",
-      "收盘不低于5日线",
-      "止损空间仍在3%-8%且到新压力/突破目标约3R"
+      "afterBreakoutRoleMigration": "收盘突破近端压力、有效压力或突破目标后，该线自动转为支撑；普通买点的上方目标必须重新寻找更高一层压力，不能继续把已突破的线当作压力。",
+      "buyStillRequiresAfterMigration": [
+        "回踩或整理不跌破转化后的支撑",
+        "回踩过程尽量缩量",
+        "再次出现小阳线或确认K线",
+        "收盘不低于5日线",
+        "止损空间仍在3%-8%且到新压力/突破目标约3R",
+        "回踩转化支撑过程中若出现跌破拉回阳线，可视为复合确认"
+      ]
+    }
+  },
+  "buySupportValidation": {
+    "id": "support_validation_buy",
+    "label": "支撑验证买入模型",
+    "status": "draft_bypass",
+    "participatesInScoring": false,
+    "versionNote": "v2.3：四条旧买入模型均写成对应升级规则；急跌修复可直接升级，其余以回踩阳线/上涨K确认为主，细节形态留作训练点。",
+    "principle": "支撑画出后一律为待验证。按类型满足升级条件后转为真实支撑；转为真实支撑后，买入只看盈亏比（至少3R）与止损空间（约3%-8%）。",
+    "states": [
+      {
+        "id": "candidate",
+        "label": "待验证",
+        "meaning": "刚画出或尚未完成类型对应的确认"
+      },
+      {
+        "id": "testing",
+        "label": "验证中",
+        "meaning": "已触碰或进入确认过程，但尚未升为真实支撑"
+      },
+      {
+        "id": "validated",
+        "label": "真实支撑",
+        "meaning": "按类型完成确认后的有效支撑；此后买入只算盈亏比"
+      },
+      {
+        "id": "invalidated",
+        "label": "失效",
+        "meaning": "收盘有效跌破且未能收回"
+      }
+    ],
+    "upgradePolicy": {
+      "noFixedTouchCount": true,
+      "note": "升为真实支撑不按固定‘守住几次’；按支撑来源类型分别判定。未写死的路径作为后续训练点，由人工样本补全。",
+      "trainingFocus": "后续在训练中补充：平台突破回踩的确认K形态、底部形态的颈线确认细节、缩量要求、以及何种阴线/十字星也算确认等。"
+    },
+    "paths": [
+      {
+        "id": "fast_drop_repair",
+        "label": "急跌修复",
+        "mapsFrom": [
+          "fast_drop_repair_platform"
+        ],
+        "requiresRetestConfirm": false,
+        "upgradeRule": "急跌后在支撑附近出现快速拉回、连续阳线、小平台或支撑踩稳确认时，无需额外验证，可直接升为真实支撑。",
+        "upgradeChecklist": [
+          "前期存在急跌或大幅回撤",
+          "当前在支撑附近出现快速拉回、连续两根及以上阳线、小平台，或支撑踩稳确认K线",
+          "满足其一即可直接升级为真实支撑"
+        ]
+      },
+      {
+        "id": "reclaim_retest_bullish",
+        "label": "跌破后回踩确认",
+        "mapsFrom": [
+          "support_reclaim_confirmed"
+        ],
+        "requiresRetestConfirm": true,
+        "upgradeRule": "盘中或近期跌破关键支撑后，收盘重新回到支撑上方；之后再次回踩支撑时，出现一根阳线或上涨K线确认（低点接近支撑、收盘回到支撑上方），即升为真实支撑。",
+        "upgradeChecklist": [
+          "曾跌破关键支撑",
+          "收盘重新站回支撑上方",
+          "再次回踩触碰支撑",
+          "回踩确认K为阳线或上涨K线，收盘在支撑上方",
+          "满足后升为真实支撑"
+        ]
+      },
+      {
+        "id": "bottom_pattern",
+        "label": "底部形态",
+        "mapsFrom": [
+          "bottom_pattern_reversal"
+        ],
+        "requiresRetestConfirm": true,
+        "upgradeRule": "底部区间不再持续创新低，并出现W底、头肩底或震仓后快速收回；突破颈线或平台上沿后，回踩颈线/平台不破，且回踩时出现一根阳线或上涨K线确认，即升为真实支撑（支撑位取颈线或平台下沿）。形态细节（颈线画法、震仓幅度等）仍可作为训练点细化。",
+        "upgradeChecklist": [
+          "底部区间不再持续创新低",
+          "出现W底、头肩底，或震仓后快速收回",
+          "突破颈线或平台上沿",
+          "回踩颈线/平台不破",
+          "回踩确认K为阳线或上涨K线",
+          "满足后升为真实支撑，支撑位=颈线或平台下沿"
+        ],
+        "trainingPending": [
+          "颈线精确画法",
+          "震仓幅度阈值",
+          "何种十字星可替代阳线确认"
+        ]
+      },
+      {
+        "id": "platform_break_retest",
+        "label": "平台突破转支撑后回踩",
+        "mapsFrom": [
+          "platform_breakout"
+        ],
+        "requiresRetestConfirm": true,
+        "upgradeRule": "价格突破小平台或交易密集区上沿后，原上沿自动画为待验证支撑；之后回踩该支撑不破，且回踩时出现一根阳线或上涨K线确认（尽量缩量），即升为真实支撑。突破K线不宜过度远离支撑。缩量、小阳线等细节可作为训练点细化。",
+        "upgradeChecklist": [
+          "收盘有效突破小平台或交易密集区上沿",
+          "原上沿自动转为待验证支撑",
+          "回踩该支撑不破",
+          "回踩确认K为阳线或上涨K线（尽量缩量）",
+          "满足后升为真实支撑"
+        ],
+        "trainingPending": [
+          "回踩缩量阈值",
+          "小阳线是否必须",
+          "突破距离过远时的处理"
+        ]
+      }
+    ],
+    "buyAfterValidated": {
+      "onlyRiskReward": true,
+      "minRiskReward": 3,
+      "stopLossPctRange": [
+        0.03,
+        0.08
+      ],
+      "inputs": [
+        "真实支撑价",
+        "止损位",
+        "上方压力"
+      ],
+      "note": "真实支撑成立后，不再套用原4套买入模型分别打分；旧模型仅保留为验证路径标签。"
+    },
+    "relationToWeeklyTrend": {
+      "down": "周线下跌时，真实支撑买入只按反弹试错，不按趋势仓",
+      "range_or_up": "周线盘整或上涨时，真实支撑 + 满足3R即可作为买入依据"
+    },
+    "legacyBuyModels": {
+      "keepAsPathLabels": true,
+      "ids": [
+        "support_reclaim_confirmed",
+        "fast_drop_repair_platform",
+        "bottom_pattern_reversal",
+        "platform_breakout"
+      ]
+    },
+    "reasonRequired": true,
+    "reasonField": "supportValidationReason"
+  },
+  "sellTrendLink": {
+    "id": "sell_score_by_weekly_trend",
+    "label": "卖出评分关联周线趋势",
+    "status": "draft_bypass",
+    "participatesInScoring": false,
+    "note": "v2.4：卖出主逻辑不修改；按周线趋势调节卖出评分。盘整补充：快速突破后观察是否回到区间（假突破偏卖，真突破转上涨）。",
+    "coreSellLogicUnchanged": true,
+    "rules": [
+      {
+        "whenTrend": "down",
+        "label": "此前为下跌趋势",
+        "effect": "打到压力时卖出评分提高；反弹遇压优先兑现，不按趋势仓继续拿。",
+        "scoreBias": "pressure_hit_sell_score_up",
+        "preference": "压力附近转弱即可偏执行，不必等趋势破坏。"
+      },
+      {
+        "whenTrend": "up",
+        "label": "此前为上涨趋势",
+        "effect": "趋势延续概率更大；不宜仅因接近压力就高分卖出。更好卖点：上涨加速后动能衰竭，或跌破上涨趋势（如跌破上升趋势线/关键抬高的低点/周线上涨结构破坏）后再卖。",
+        "scoreBias": "near_pressure_alone_sell_score_down; sell_after_acceleration_or_uptrend_break_score_up",
+        "preference": "接近压力先预警；加速后转弱或跌破上涨趋势再提高卖出评分。"
+      },
+      {
+        "whenTrend": "range",
+        "label": "盘整结构",
+        "effect": "打到区间上沿压力时卖出评分提高，按区间上沿兑现；跌破下沿按止损/结构破坏处理。盘整也可能突破：若向上快速突破，先观察是否回到盘整区间——回到区间内需有一定空间（不能贴着上沿），视为假突破，卖出评分提高；站稳区间外、回踩不破上沿，则按突破转上涨处理，不宜仅因离开上沿就高分卖出。",
+        "scoreBias": "range_upper_pressure_sell_score_up",
+        "preference": "上沿兑现、下沿止损；快速突破后先看是否有效回到区间（需有空间），假突破偏卖，真突破转上涨结构后按上涨趋势卖出偏好。",
+        "breakoutFollowUp": {
+          "fastBreakUp": "快速向上突破后，先观察是否回到盘整区间",
+          "backIntoRange": "回到区间内=假突破，卖出评分提高，偏兑现",
+          "backIntoRangeSpace": {
+            "meaning": "“回到区间内”必须有一定空间，不能收盘仅略低于上沿就算假突破",
+            "spanRatio": 0.2,
+            "minPct": 2,
+            "maxPct": 6,
+            "rule": "周收盘需重新落在上沿下方至少 max(跨度×20%, 2%)、且不超过跨度×20% 与 6% 的封顶口径内所要求的空间；建议：收盘低于上沿达到 跨度的20%（限定在2%–6%）才算有效回到区间"
+          },
+          "holdOutside": "站稳区间外且回踩不破原上沿=真突破，转入上涨趋势关联，不因离开上沿单独高分卖出"
+        }
+      }
+    ],
+    "relationToExisting": {
+      "warningVsAction": "预警与执行的区分保持不变；趋势只调节评分高低与‘何时升为执行’的偏好。",
+      "before3R": "从未到过3R时仍不因接近压力单独止盈；下跌趋势下打到压力的高分卖出，优先落在‘反弹仓兑现/预警升执行’，不绕开止损优先级。",
+      "after3R": "曾达3R后的止盈逻辑不变；上涨趋势下更强调加速后或趋势破坏再止盈。"
+    }
+  },
+  "levelTrainingHooks": {
+    "id": "level_rules_training_hooks",
+    "label": "支撑压力规则训练预留",
+    "status": "training_hooks_only",
+    "note": "v2.5：levelRules 六条正文不修改；仅预留可由人工样本补全的训练口子。",
+    "coreRulesUnchanged": true,
+    "hooks": [
+      {
+        "id": "weekly_zone_placement",
+        "mapsTo": "weekly_first_daily_refine",
+        "openQuestions": [
+          "周线大区间边界取实体还是影线",
+          "日线细化时优先平台上下沿还是回踩低点",
+          "多条密集区并存时如何选最近有效线"
+        ]
+      },
+      {
+        "id": "body_vs_wick",
+        "mapsTo": "body_zone_priority",
+        "openQuestions": [
+          "摆动点离实体区多远必须挪线",
+          "何种长影可保留为有效边界"
+        ]
+      },
+      {
+        "id": "break_to_support_confirm",
+        "mapsTo": "resistance_to_support",
+        "openQuestions": [
+          "有效突破的收盘幅度",
+          "回踩确认除阳线/上涨K外还有哪些形态",
+          "缩量是否硬条件"
+        ],
+        "linksTo": "buySupportValidation.platform_break_retest"
+      },
+      {
+        "id": "level_migration_timing",
+        "mapsTo": "level_migration",
+        "openQuestions": [
+          "何时废弃旧线",
+          "上方无新压力时是否允许暂空",
+          "假突破回到区间后线如何回退"
+        ]
+      },
+      {
+        "id": "pressure_sell_threshold",
+        "mapsTo": "pressure_as_sell_zone",
+        "openQuestions": [
+          "预警升执行的K线形态清单",
+          "与周线趋势卖出偏好如何叠加"
+        ],
+        "linksTo": "sellTrendLink"
+      },
+      {
+        "id": "pressure_layer_assignment",
+        "mapsTo": "pressure_layering",
+        "openQuestions": [
+          "近端/有效/突破目标的划分阈值",
+          "人工改层后的锁定规则"
+        ]
+      },
+      {
+        "id": "support_state_machine",
+        "mapsTo": "buySupportValidation",
+        "openQuestions": [
+          "待验证/验证中/真实支撑/失效的样本标注字段",
+          "急跌修复直接升级的边界案例"
+        ]
+      },
+      {
+        "id": "range_false_break_space",
+        "mapsTo": "sellTrendLink.range",
+        "openQuestions": [
+          "回到区间所需空间是否按跨度20%（2%–6%）合适",
+          "快速突破的定义（幅度/根数）"
+        ]
+      }
+    ],
+    "sampleAnnotationFields": [
+      "levelRole",
+      "validationStatus",
+      "pathId",
+      "weeklyTrend",
+      "falseBreak",
+      "spaceOk",
+      "manualOverride"
     ]
+  },
+  "scoringAdjustmentsRemoved": {
+    "id": "scoring_adjustments_removed_v2_6",
+    "label": "因与支撑验证/周线趋势重叠或冲突而移出的评分修正",
+    "version": "2.6",
+    "note": "正文从 scoringAdjustments 移除，完整条文保留在此便于回滚；细节形态留作训练点。",
+    "items": [
+      {
+        "rule": "fast reclaim two-up buy trigger",
+        "adjustment": "急跌后连续两根阳线快速拉回并站上5日线时，连续阳线本身可作为修复确认；不再因缺少完整平台或压力线直接降为观察。",
+        "reason": "overlap_or_conflict_with_buySupportValidation_or_weekly_trend"
+      },
+      {
+        "rule": "000958 2024-02-07 fast reclaim case",
+        "adjustment": "急跌后两根阳线快速收回、收盘站上MA5时，应进入买入建议判断；若同时有支撑/压力线和止损盈亏比支持，可输出建议买入。",
+        "reason": "overlap_or_conflict_with_buySupportValidation_or_weekly_trend"
+      },
+      {
+        "rule": "dense zone pullback confirmation",
+        "adjustment": "平台/交易密集区突破不直接追买；突破后缩量回踩不破，并再次出现小阳线，才提高为高质量买点。",
+        "reason": "overlap_or_conflict_with_buySupportValidation_or_weekly_trend"
+      },
+      {
+        "rule": "long downtrend repair stage priority",
+        "adjustment": "当价格仍低于 MA60/MA120 且中长期跌幅较大时，短线均线多头排列不能把阶段升级为“上升趋势中的大调整”；应优先输出“长期下跌后尝试趋势扭转”。",
+        "reason": "overlap_or_conflict_with_buySupportValidation_or_weekly_trend"
+      },
+      {
+        "rule": "AI buy score >= 90 but only because of支撑拉回",
+        "adjustment": "如果没有平台/形态/连续阳线确认，动作从买入降为观察，计划写“等待下一根站稳或回踩不破”。",
+        "reason": "overlap_or_conflict_with_buySupportValidation_or_weekly_trend"
+      },
+      {
+        "rule": "manual buy while AI watch",
+        "adjustment": "若人工理由包含急跌修复、小平台突破、W底、头肩底、震仓拉回、突破买入，应提高对应模型分并生成条件化买入计划。",
+        "reason": "overlap_or_conflict_with_buySupportValidation_or_weekly_trend"
+      },
+      {
+        "rule": "fast drop repair with far resistance",
+        "adjustment": "急跌后连续阳线站上5日线，且上方压力距离约12%以上或盈亏比达到3R以上时，提高急跌修复模型分数，可直接给建议买入；压力近或止损远时仍降为观察。",
+        "reason": "overlap_or_conflict_with_buySupportValidation_or_weekly_trend"
+      },
+      {
+        "rule": "support reclaim without space or retest",
+        "adjustment": "跌破支撑后若只是略微收回支撑上方，降低模型分；未出现二次回踩确认/小平台/缩量企稳时，默认观望，不直接建议买入。",
+        "reason": "overlap_or_conflict_with_buySupportValidation_or_weekly_trend"
+      },
+      {
+        "rule": "composite reclaim second pierce bullish confirm",
+        "adjustment": "复合跌破拉回结构中，若此前已有跌破拉回背景，当前踩稳确认阶段再次刺破支撑并收阳拉回，则提高跌破支撑后快速拉回模型分数，可替代2.5%以上拉回空间要求。",
+        "reason": "overlap_or_conflict_with_buySupportValidation_or_weekly_trend"
+      },
+      {
+        "rule": "breakout pullback composite reclaim confirm",
+        "adjustment": "突破回踩确认阶段，若回踩到转化支撑时出现跌破/刺破支撑后收阳拉回，则提高交易密集区突破后回踩确认模型分数，可替代普通缩量回踩确认。",
+        "reason": "overlap_or_conflict_with_buySupportValidation_or_weekly_trend"
+      },
+      {
+        "rule": "breakout pullback shrunk then bullish confirm",
+        "adjustment": "突破回踩过程中若前几日已经缩量，当前阳线站回支撑且量能未超过近20日均量约1.5倍，则提高突破回踩确认/跌破拉回复合模型分数。",
+        "reason": "overlap_or_conflict_with_buySupportValidation_or_weekly_trend"
+      },
+      {
+        "rule": "support reclaim multi day hold breaks short high",
+        "adjustment": "After support is pierced, two or more closes back above support plus a bullish close at/above the recent 10-day high area and volume <= 1.5x 20-day average can confirm the support reclaim, even if the final confirmation day is not shrinking volume.",
+        "reason": "overlap_or_conflict_with_buySupportValidation_or_weekly_trend"
+      }
+    ]
+  },
+  "uiTrainingRequirements": {
+    "id": "auto_trend_and_support_reason",
+    "label": "趋势自动变化与支撑验证原因",
+    "note": "v2.7：实现要求。趋势方向/阶段随分析日走势自动重算；支撑升级必须附带可读验证原因。",
+    "autoTrend": {
+      "fields": [
+        "weeklyTrendDirection",
+        "weeklyTrendStage"
+      ],
+      "rule": "随分析日推进，仅用已收盘周线/必要日线自动重算，不得固定在一次快照上。",
+      "classes": [
+        "上涨",
+        "下跌",
+        "盘整"
+      ],
+      "stagesUnderClass": "沿用 trendStructureRules.subStageMapping"
+    },
+    "supportValidationReason": {
+      "required": true,
+      "field": "supportValidationReason",
+      "rule": "每次状态变化、尤其升为真实支撑时，必须写出路径、确认K/日期、确认形态（如急跌连续阳线、回踩阳线、平台突破回踩等）。",
+      "showInUi": true
     }
   }
 }

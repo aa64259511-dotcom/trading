@@ -139,6 +139,251 @@ function ruleRiskRewardLine(candle, supportPrice, resistancePrice, fallbackStop 
   };
 }
 
+function evaluateSupportPathValidation(history = [], price, meta = {}) {
+  const levelPrice = Number(price);
+  const bars = (Array.isArray(history) ? history : []).filter((bar) => bar && Number(bar.close) > 0 && Number(bar.high) > 0 && Number(bar.low) > 0);
+  const asOfDate = bars.at(-1)?.date || "";
+  const pathLabels = {
+    fast_drop_repair: "急跌修复",
+    reclaim_retest_bullish: "跌破后回踩确认",
+    bottom_pattern: "底部形态",
+    platform_break_retest: "平台突破回踩",
+  };
+  const statusLabels = {
+    candidate: "待验证",
+    testing: "验证中",
+    validated: "真实支撑",
+    invalidated: "失效",
+  };
+  const fallbackReason = `${asOfDate || "当前"} 支撑仍为待验证候选，尚未出现路径确认。`;
+  if (!(levelPrice > 0) || bars.length < 5) {
+    return {
+      status: "candidate",
+      label: "待验证",
+      pathId: "",
+      pathLabel: "",
+      price: levelPrice > 0 ? Number(levelPrice.toFixed(4)) : null,
+      validationReason: fallbackReason,
+      supportValidationReason: fallbackReason,
+      validationHistory: [{ date: asOfDate, status: "candidate", pathId: "", validationReason: fallbackReason }],
+      participatesInScoring: false,
+      asOfDate,
+      source: meta.source || "",
+    };
+  }
+
+  let status = "candidate";
+  let pathId = "";
+  let reason = `${bars[0].date || "起始"} 支撑 ${levelPrice.toFixed(2)} 画出后为待验证候选。`;
+  const validationHistory = [{ date: bars[0].date || "", status, pathId, validationReason: reason }];
+  const commit = (nextStatus, nextPath, bar, text) => {
+    const safeText = String(text || "").trim() || `${bar?.date || asOfDate} 支撑验证状态更新为${statusLabels[nextStatus] || nextStatus}。`;
+    if (nextStatus === status && (nextPath || "") === pathId && safeText === reason) return;
+    status = nextStatus;
+    pathId = nextPath || "";
+    reason = safeText;
+    validationHistory.push({ date: bar?.date || "", status, pathId, validationReason: safeText });
+  };
+
+  let brokeIndex = -1;
+  let reclaimIndex = -1;
+  let consecutiveBull = 0;
+  let platformHigh = null;
+  let platformBreakIndex = -1;
+  let neckline = null;
+  let neckBreakIndex = -1;
+  let secondBottomIndex = -1;
+
+  for (let index = 0; index < bars.length; index += 1) {
+    const bar = bars[index];
+    const open = Number(bar.open);
+    const high = Number(bar.high);
+    const low = Number(bar.low);
+    const close = Number(bar.close);
+    const prev = index ? bars[index - 1] : null;
+    const date = bar.date || "";
+    const bullish = close > open;
+    const upCandle = prev ? close > Number(prev.close) : bullish;
+    const confirming = bullish || upCandle;
+    const confirmText = bullish ? "阳线" : "上涨K线";
+    const near = low <= levelPrice * 1.025 && low >= levelPrice * 0.96;
+    const held = close >= levelPrice * 0.995;
+    const brokeClose = close < levelPrice * 0.985;
+
+    if (brokeClose) {
+      brokeIndex = index;
+      reclaimIndex = -1;
+      platformBreakIndex = -1;
+      neckBreakIndex = -1;
+      consecutiveBull = 0;
+      commit("invalidated", pathId, bar, `${date} 收盘跌破支撑 ${levelPrice.toFixed(2)}，支撑验证状态改为失效。`);
+      continue;
+    }
+    if (brokeIndex >= 0 && reclaimIndex < 0 && close >= levelPrice) {
+      reclaimIndex = index;
+      commit("testing", "reclaim_retest_bullish", bar, `${date} 跌破后收盘重新站回支撑 ${levelPrice.toFixed(2)} 上方，进入验证中，等待后续阳线回踩。`);
+    }
+    if (bullish && (!prev || close >= Number(prev.close))) consecutiveBull += 1;
+    else consecutiveBull = bullish ? 1 : 0;
+
+    if (status !== "validated") {
+      const window = bars.slice(Math.max(0, index - 15), index + 1);
+      let highOffset = 0;
+      window.forEach((item, offset) => {
+        if (Number(item.high) >= Number(window[highOffset].high)) highOffset = offset;
+      });
+      const afterHigh = window.slice(highOffset);
+      const lowAfterHigh = Math.min(...afterHigh.map((item) => Number(item.low)));
+      const dropFromHigh = Number(window[highOffset].high) > 0
+        ? (Number(window[highOffset].high) - lowAfterHigh) / Number(window[highOffset].high)
+        : 0;
+      const fastDrop = highOffset < window.length - 1 && dropFromHigh >= 0.12 && lowAfterHigh <= levelPrice * 1.04;
+      const box = index >= 5 ? bars.slice(Math.max(0, index - 6), index) : [];
+      const boxHigh = box.length ? Math.max(...box.map((item) => Number(item.high))) : 0;
+      const boxLow = box.length ? Math.min(...box.map((item) => Number(item.low))) : 0;
+      const smallPlatform = box.length >= 4 && boxLow > 0 && (boxHigh - boxLow) / boxLow <= 0.08 && Math.abs(boxLow - levelPrice) / levelPrice <= 0.03;
+      const nearRepair = low <= levelPrice * 1.03 && held;
+      if (fastDrop && nearRepair && (consecutiveBull >= 2 || (bullish && near) || smallPlatform)) {
+        const how = consecutiveBull >= 2 ? "急跌后连续阳线快速拉回" : smallPlatform ? "急跌后小平台确认" : "急跌后支撑踩稳阳线";
+        commit("validated", "fast_drop_repair", bar, `${date} 急跌修复路径直接升级：${how}，收盘站上支撑 ${levelPrice.toFixed(2)}，无需额外回踩，确认为真实支撑。`);
+        continue;
+      }
+    }
+
+    if (status !== "validated" && index >= 6) {
+      const box = bars.slice(index - 6, index);
+      const boxHigh = Math.max(...box.map((item) => Number(item.high)));
+      const boxLow = Math.min(...box.map((item) => Number(item.low)));
+      const tight = boxLow > 0 && (boxHigh - boxLow) / boxLow <= 0.08;
+      const matchesLevel = Math.abs(boxHigh - levelPrice) / levelPrice <= 0.03 || Math.abs(boxLow - levelPrice) / levelPrice <= 0.03;
+      if (tight && matchesLevel && close > boxHigh && bullish) {
+        platformHigh = boxHigh;
+        platformBreakIndex = index;
+        commit("testing", "platform_break_retest", bar, `${date} 平台突破路径：收盘突破平台上沿 ${boxHigh.toFixed(2)}，原上沿转为待验证支撑，等待回踩阳线。`);
+      }
+    }
+    if (status !== "validated" && platformBreakIndex >= 0 && index > platformBreakIndex && platformHigh) {
+      const retest = low <= Math.max(platformHigh, levelPrice) * 1.02 && held && confirming;
+      if (retest) {
+        const volumeNote = "";
+        commit("validated", "platform_break_retest", bar, `${date} 平台突破回踩：回踩不破，出现${confirmText}确认${volumeNote}，升为真实支撑。`);
+        continue;
+      }
+    }
+
+    if (status !== "validated" && brokeIndex >= 0 && reclaimIndex >= 0 && index > reclaimIndex && near && held && confirming) {
+      commit("validated", "reclaim_retest_bullish", bar, `${date} 跌破后回踩确认：${confirmText}回踩支撑 ${levelPrice.toFixed(2)} 不破，收盘回到支撑上方，升为真实支撑。`);
+      continue;
+    }
+
+    if (status !== "validated" && index >= 8) {
+      const confirmedLows = [];
+      for (let pivot = 2; pivot <= index - 2; pivot += 1) {
+        const sample = bars.slice(pivot - 2, pivot + 3);
+        const pivotLow = Number(bars[pivot].low);
+        if (pivotLow <= Math.min(...sample.map((item) => Number(item.low)))) confirmedLows.push({ index: pivot, price: pivotLow });
+      }
+      const nearLows = confirmedLows.filter((point) => Math.abs(point.price - levelPrice) / levelPrice <= 0.04);
+      if (nearLows.length >= 2) {
+        const left = nearLows[nearLows.length - 2];
+        const right = nearLows[nearLows.length - 1];
+        const similar = Math.abs(left.price - right.price) / Math.max(left.price, right.price) <= 0.06;
+        if (similar && right.index > left.index) {
+          const middle = bars.slice(left.index, right.index + 1);
+          const neck = Math.max(...middle.map((item) => Number(item.high)));
+          neckline = neck;
+          secondBottomIndex = right.index;
+          if (neckBreakIndex < 0 && index > right.index && close > neck) {
+            neckBreakIndex = index;
+            commit("testing", "bottom_pattern", bar, `${date} 底部形态路径：两次低点不再创新低，收盘突破颈线 ${neck.toFixed(2)}，等待回踩阳线。`);
+          }
+        }
+      }
+    }
+    if (status !== "validated" && neckBreakIndex >= 0 && index > neckBreakIndex && neckline && low <= neckline * 1.02 && close >= neckline * 0.995 && confirming && held) {
+      commit("validated", "bottom_pattern", bar, `${date} 底部形态回踩：回踩颈线 ${neckline.toFixed(2)} 不破，出现${confirmText}确认，支撑位按颈线或平台下沿 ${levelPrice.toFixed(2)} 升为真实支撑。`);
+      continue;
+    }
+
+    if (status === "candidate" && (near || (held && low <= levelPrice * 1.03))) {
+      commit("testing", pathId, bar, `${date} 价格触及支撑 ${levelPrice.toFixed(2)}，进入验证中，等待急跌连续阳线、阳线回踩或平台突破回踩确认。`);
+    }
+  }
+
+  if (status === "validated" && !String(reason).trim()) {
+    reason = `${asOfDate} 支撑 ${levelPrice.toFixed(2)} 已升为真实支撑。`;
+  }
+  if (!String(reason).trim()) reason = fallbackReason;
+  return {
+    status,
+    label: statusLabels[status] || status,
+    pathId,
+    pathLabel: pathLabels[pathId] || "",
+    price: Number(levelPrice.toFixed(4)),
+    validationReason: reason,
+    supportValidationReason: reason,
+    validationHistory,
+    participatesInScoring: false,
+    asOfDate,
+    source: meta.source || "",
+  };
+}
+
+function buildBypassBuyGate(advice, validation, history) {
+  const label = validation?.label || "待验证";
+  const reason = String(validation?.validationReason || validation?.supportValidationReason || "").trim();
+  const result = {
+    bypassBuyEligible: false,
+    bypassBuyReason: "",
+    bypassRiskReward: null,
+    bypassStopLossPct: null,
+    bypassParticipatesInScoring: false,
+  };
+  if (!validation || validation.status !== "validated") {
+    result.bypassBuyReason = `支撑验证状态：${label}。${reason || "尚未升为真实支撑。"} 旁路买入资格未开启，原买入评分不变。`.trim();
+    return result;
+  }
+  if (!reason) {
+    result.bypassBuyReason = "支撑已验证但缺少验证原因，旁路买入资格未开启，原买入评分不变。";
+    return result;
+  }
+  const bars = Array.isArray(history) ? history : [];
+  const close = Number(bars.at(-1)?.close || 0);
+  const stop = Number(advice?.stopLoss || 0);
+  const resistance = Number(advice?.pressurePlan?.price || advice?.pressurePlan?.level?.price || 0);
+  let stopPct = null;
+  if (advice && advice.stopRiskPct != null && advice.stopRiskPct !== "" && Number.isFinite(Number(advice.stopRiskPct))) {
+    stopPct = Number(advice.stopRiskPct) / 100;
+  } else if (close > stop && stop > 0) {
+    stopPct = (close - stop) / close;
+  }
+  let riskReward = null;
+  if (close > stop && stop > 0 && resistance > close) {
+    riskReward = (resistance - close) / (close - stop);
+  }
+  result.bypassRiskReward = riskReward == null ? null : Number(riskReward.toFixed(2));
+  result.bypassStopLossPct = stopPct == null ? null : Number((stopPct * 100).toFixed(2));
+  const stopOk = stopPct != null && stopPct >= 0.03 - 1e-8 && stopPct <= 0.08 + 1e-8;
+  const rewardOk = riskReward != null && riskReward >= 3;
+  result.bypassBuyEligible = Boolean(stopOk && rewardOk);
+  const rewardText = riskReward == null ? "缺少上方压力，未计算盈亏比" : `盈亏比 ${riskReward.toFixed(2)}`;
+  const stopText = stopPct == null ? "缺少止损" : `止损空间 ${(stopPct * 100).toFixed(2)}%`;
+  result.bypassBuyReason = result.bypassBuyEligible
+    ? `支撑验证状态：真实支撑。验证原因：${reason} 旁路买入只看${rewardText}（需至少3）和${stopText}（约3%到8%），当前满足。不替换原买入模型评分。`
+    : `支撑验证状态：真实支撑。验证原因：${reason} 旁路买入未通过：${rewardText}，${stopText}。需要盈亏比至少3且止损约3%到8%。原买入评分不变。`;
+  return result;
+}
+
+function manualSupportPrice() {
+  if (typeof nearestManualLevels !== "function") return null;
+  try {
+    const price = Number(nearestManualLevels()?.support?.price);
+    return price > 0 ? price : null;
+  } catch (error) {
+    return null;
+  }
+}
+
 function recognizeMarketStructure(history = []) {
   const STATUS_LABELS = {
     candidate: "候选",
@@ -172,20 +417,35 @@ function recognizeMarketStructure(history = []) {
     zoneLow: null,
     zoneHigh: null,
     basis: "可用K线不足，未做结构判断。",
+    validationReason: "可用K线不足，未做支撑验证。",
+    supportValidationReason: "可用K线不足，未做支撑验证。",
     confirmedTouches: 0,
     source: "",
     asOfDate,
     participatesInScoring: false,
   });
   if (bars.length < 20) {
+    const emptySupport = blankValidation("support");
     return {
       trendDirection: "",
       trendStage: "K线不足",
       trendConfidence: 0,
       supportCandidates: [],
       resistanceCandidates: [],
-      supportValidation: blankValidation("support"),
+      supportValidation: emptySupport,
       resistanceValidation: blankValidation("resistance"),
+      bypassSupportValidation: {
+        status: "candidate",
+        label: "待验证",
+        pathId: "",
+        pathLabel: "",
+        price: null,
+        validationReason: emptySupport.validationReason,
+        supportValidationReason: emptySupport.supportValidationReason,
+        validationHistory: [],
+        participatesInScoring: false,
+        asOfDate,
+      },
       asOfDate,
       lookbackBars: bars.length,
       participatesInScoring: false,
@@ -292,6 +552,7 @@ function recognizeMarketStructure(history = []) {
     let lastTouchDate = "";
     let reactions = [];
     let volumeNotes = [];
+    let validationReason = `${bars[start]?.date || "起始"} 摆动低点 ${roundPrice(price)} 形成支撑候选，状态为候选。`;
     for (let index = start; index < bars.length; index += 1) {
       const bar = bars[index];
       const close = Number(bar.close);
@@ -304,11 +565,13 @@ function recognizeMarketStructure(history = []) {
         status = "broken";
         touches = 0;
         active = false;
+        validationReason = `${bar.date || ""} 收盘跌破支撑 ${roundPrice(price)}，状态改为已失效。`;
         continue;
       }
       if (status === "broken" && close >= price) {
         status = "reclaimed";
         active = false;
+        validationReason = `${bar.date || ""} 跌破后收盘收回支撑 ${roundPrice(price)}，尚未完成回踩确认。`;
         continue;
       }
       if (status === "broken" || !tagged || !held) {
@@ -327,14 +590,26 @@ function recognizeMarketStructure(history = []) {
       const confirming = close >= open && close >= price * 0.995;
       if (status === "reclaimed") {
         status = touches >= 2 && confirming ? "validated" : "testing";
+        validationReason = status === "validated"
+          ? `${bar.date || ""} 跌破收回后再次守住，确认K线收在支撑上方，升为已验证支撑。`
+          : `${bar.date || ""} 跌破收回后的回踩仍在验证中。`;
       } else if (touches >= 2 && confirming) {
         status = "validated";
+        validationReason = `${bar.date || ""} 至少两次独立回踩守住，当日阳线收在支撑 ${roundPrice(price)} 上方，升为已验证支撑。`;
       } else if (status !== "validated") {
         status = "testing";
+        validationReason = `${bar.date || ""} 价格触碰支撑 ${roundPrice(price)}，进入验证中，单次反弹不升为已验证。`;
       }
     }
     const close = Number(bars.at(-1).close);
+    const statusBeforeExpire = status;
     status = maybeExpire(status, lastTouchIndex, price, close);
+    if (status === "expired" && statusBeforeExpire !== "expired") {
+      validationReason = `${asOfDate} 支撑距离当前价格较远且长时间未再验证，状态改为已过期。`;
+    }
+    if (status === "validated" && !String(validationReason).trim()) {
+      validationReason = `${lastTouchDate || asOfDate} 支撑 ${roundPrice(price)} 已验证。`;
+    }
     const basisByStatus = {
       candidate: "摆动低点形成的支撑候选，单次下探不会升级为已验证。",
       testing: "价格已触碰该支撑，仍需另一次守住，不能因一次反弹视为已验证。",
@@ -355,6 +630,8 @@ function recognizeMarketStructure(history = []) {
       reactionPct: reactions.length ? reactions.reduce((sum, item) => sum + item, 0) / reactions.length : null,
       volumeNote: volumeNotes.at(-1) || "",
       basis: basisByStatus[status] || "",
+      validationReason,
+      supportValidationReason: validationReason,
       firstDate: bars[start]?.date || firstPoint?.date || "",
       lastTouchDate,
       lastTouchIndex,
@@ -413,6 +690,7 @@ function recognizeMarketStructure(history = []) {
       broken: "收盘已突破该压力。突破本身不会把它变成已验证支撑。",
       expired: "该压力距离当前价格较远，或已经过旧。",
     };
+    const validationReason = `${lastTouchDate || bars[start]?.date || asOfDate} ${basisByStatus[status] || "压力状态更新。"}`;
     return {
       price: roundPrice(price),
       zoneLow: roundPrice(price * 0.985),
@@ -425,6 +703,7 @@ function recognizeMarketStructure(history = []) {
       reactionPct: reactions.length ? reactions.reduce((sum, item) => sum + item, 0) / reactions.length : null,
       volumeNote: volumeNotes.at(-1) || "",
       basis: basisByStatus[status] || "",
+      validationReason,
       firstDate: bars[start]?.date || firstPoint?.date || "",
       lastTouchDate,
       lastTouchIndex,
@@ -439,6 +718,7 @@ function recognizeMarketStructure(history = []) {
     let lastTouchDate = "";
     let reactions = [];
     let status = "pending_retest";
+    let validationReason = `${bars[breakoutIndex]?.date || asOfDate} 收盘突破压力 ${roundPrice(price)} 后只记为待回踩确认，突破当日不视为已验证支撑。`;
     for (let index = breakoutIndex + 1; index < bars.length; index += 1) {
       const bar = bars[index];
       const close = Number(bar.close);
@@ -448,11 +728,13 @@ function recognizeMarketStructure(history = []) {
         status = "broken";
         holds = 0;
         active = false;
+        validationReason = `${bar.date || ""} 突破后的回踩没有守住 ${roundPrice(price)}，该支撑候选失效。`;
         continue;
       }
       if (status === "broken" && close >= price) {
         status = "reclaimed";
         active = false;
+        validationReason = `${bar.date || ""} 跌破后收回 ${roundPrice(price)}，仍需后续回踩确认，不能直接视为已验证支撑。`;
         continue;
       }
       const tagged = low <= price * 1.02 && low >= price * 0.97;
@@ -476,6 +758,11 @@ function recognizeMarketStructure(history = []) {
       } else if (status !== "validated") {
         status = "testing";
       }
+      validationReason = status === "validated"
+        ? `${bar.date || ""} 平台突破回踩：第 ${holds} 次回踩守住，确认K线收阳，升为已验证支撑。`
+        : status === "testing"
+          ? `${bar.date || ""} 压力突破后的回踩仍在验证中，单次回踩不升为已验证支撑。`
+          : validationReason;
     }
     const basisByStatus = {
       pending_retest: "收盘突破压力后只记为待回踩确认，突破当日不视为已验证支撑。",
@@ -496,6 +783,8 @@ function recognizeMarketStructure(history = []) {
       reactionPct: reactions.length ? reactions.reduce((sum, item) => sum + item, 0) / reactions.length : null,
       volumeNote: "",
       basis: basisByStatus[status] || "",
+      validationReason: validationReason || basisByStatus[status] || `${asOfDate} 支撑状态更新。`,
+      supportValidationReason: validationReason || basisByStatus[status] || `${asOfDate} 支撑状态更新。`,
       firstDate: bars[breakoutIndex]?.date || "",
       lastTouchDate,
       lastTouchIndex,
@@ -600,12 +889,15 @@ function recognizeMarketStructure(history = []) {
         zoneLow: null,
         zoneHigh: null,
         basis: kind === "support" ? "当前可见K线里没有可用的支撑候选。" : "当前可见K线里没有仍有效的压力候选。",
+        validationReason: kind === "support" ? "当前可见K线里没有可用的支撑候选。" : "当前可见K线里没有仍有效的压力候选。",
+        supportValidationReason: kind === "support" ? "当前可见K线里没有可用的支撑候选。" : "当前可见K线里没有仍有效的压力候选。",
         confirmedTouches: 0,
         source: "",
         asOfDate,
         participatesInScoring: false,
       };
     }
+    const validationReason = selected.validationReason || selected.supportValidationReason || selected.basis || `${asOfDate} ${selected.statusLabel || selected.status || "状态更新"}。`;
     return {
       status: selected.status,
       label: selected.statusLabel,
@@ -613,6 +905,8 @@ function recognizeMarketStructure(history = []) {
       zoneLow: selected.zoneLow,
       zoneHigh: selected.zoneHigh,
       basis: selected.basis,
+      validationReason,
+      supportValidationReason: selected.supportValidationReason || validationReason,
       confirmedTouches: selected.touches,
       source: selected.source,
       asOfDate,
@@ -705,6 +999,24 @@ function recognizeMarketStructure(history = []) {
     trendStage = close > ma20 ? "趋势修复" : "震荡筑底";
   }
 
+  const bypassSupportValidation = supportValidation.price
+    ? evaluateSupportPathValidation(bars, supportValidation.price, { source: supportValidation.source || "structure" })
+    : {
+      status: "candidate",
+      label: "待验证",
+      pathId: "",
+      pathLabel: "",
+      price: null,
+      validationReason: supportValidation.validationReason || "当前没有可验证的支撑。",
+      supportValidationReason: supportValidation.supportValidationReason || supportValidation.validationReason || "当前没有可验证的支撑。",
+      validationHistory: [],
+      participatesInScoring: false,
+      asOfDate,
+    };
+  if (bypassSupportValidation.status === "validated" && !String(bypassSupportValidation.validationReason || "").trim()) {
+    bypassSupportValidation.validationReason = `${asOfDate} 支撑已升为真实支撑。`;
+    bypassSupportValidation.supportValidationReason = bypassSupportValidation.validationReason;
+  }
   return {
     trendDirection,
     trendStage,
@@ -713,6 +1025,7 @@ function recognizeMarketStructure(history = []) {
     resistanceCandidates,
     supportValidation,
     resistanceValidation,
+    bypassSupportValidation,
     asOfDate,
     lookbackBars: bars.length,
     participatesInScoring: false,
@@ -722,6 +1035,11 @@ function recognizeMarketStructure(history = []) {
 
 function attachStructureRecognition(advice, history) {
   const structure = recognizeMarketStructure(history);
+  const manualPrice = manualSupportPrice();
+  const bypassSupportValidation = manualPrice
+    ? evaluateSupportPathValidation(history, manualPrice, { source: "manual" })
+    : structure.bypassSupportValidation;
+  const gate = buildBypassBuyGate(advice, bypassSupportValidation, history);
   if (!advice || typeof advice !== "object") return advice;
   return {
     ...advice,
@@ -732,6 +1050,357 @@ function attachStructureRecognition(advice, history) {
     resistanceCandidates: structure.resistanceCandidates,
     supportValidation: structure.supportValidation,
     resistanceValidation: structure.resistanceValidation,
+    bypassSupportValidation,
+    bypassBuyEligible: gate.bypassBuyEligible,
+    bypassBuyReason: gate.bypassBuyReason,
+    bypassRiskReward: gate.bypassRiskReward,
+    bypassStopLossPct: gate.bypassStopLossPct,
+    bypassParticipatesInScoring: false,
+  };
+}
+
+function humanSupportPath(evidence) {
+  const table = {
+    "急跌修复": ["fast_drop_repair", "急跌修复"],
+    "跌破后回踩确认": ["reclaim_retest_bullish", "跌破后回踩确认"],
+    "多次回踩反弹": ["reclaim_retest_bullish", "多次回踩反弹"],
+    "multiple_retests": ["reclaim_retest_bullish", "多次回踩反弹"],
+    "假跌破后收回": ["reclaim_retest_bullish", "假跌破后收回"],
+    "false_break_reclaim": ["reclaim_retest_bullish", "假跌破后收回"],
+    "底部形态": ["bottom_pattern", "底部形态"],
+    "头肩底": ["bottom_pattern", "底部形态"],
+    "head_shoulders_bottom": ["bottom_pattern", "底部形态"],
+    "平台突破回踩": ["platform_break_retest", "平台突破回踩"],
+    "突破回踩": ["platform_break_retest", "平台突破回踩"],
+    "breakout_retest": ["platform_break_retest", "平台突破回踩"],
+    "人工结构判断": ["", "人工结构判断"],
+    "manual_structure": ["", "人工结构判断"],
+  };
+  const hit = table[String(evidence || "").trim()];
+  if (hit) return { pathId: hit[0], pathLabel: hit[1] };
+  const text = String(evidence || "").trim();
+  return text ? { pathId: "", pathLabel: text } : { pathId: "", pathLabel: "" };
+}
+
+function readHumanReplaySelections() {
+  if (typeof document === "undefined" || typeof humanStructureSelections !== "function") {
+    return {
+      status: "",
+      evidence: "",
+      pathId: "",
+      pathLabel: "",
+      directionValue: "",
+      directionLabel: "",
+      stageValue: "",
+      stageLabel: "",
+      sellCorrection: "",
+      sellCorrectionLabel: "",
+    };
+  }
+  const human = humanStructureSelections();
+  const evidenceKey = human.humanEvidenceValue || human.humanEvidence || "";
+  const path = humanSupportPath(evidenceKey);
+  return {
+    status: human.humanSupportValue || "",
+    evidence: evidenceKey,
+    evidenceLabel: human.humanEvidence || path.pathLabel || "",
+    pathId: path.pathId,
+    pathLabel: path.pathLabel || human.humanEvidence || "",
+    directionValue: human.humanDirectionValue || "",
+    directionLabel: human.humanDirection || "",
+    stageValue: human.humanStageValue || "",
+    stageLabel: human.humanStage || "",
+    sellCorrection: human.humanSellCorrection || "",
+    sellCorrectionLabel: human.humanSellLabel || "",
+  };
+}
+
+function applyHumanReplayOverrides(advice, humanOverride = null, context = {}) {
+  if (!advice || typeof advice !== "object") return advice;
+  const lockedScore = advice.score;
+  const lockedModel = advice.model;
+  const lockedMatched = advice.matched;
+  const lockedParticipates = advice.participatesInScoring;
+  const copy = { ...advice };
+  const human = humanOverride || readHumanReplaySelections();
+  const status = String(human.status || human.humanSupportStatus || "").trim();
+  const evidence = String(human.evidence || human.humanEvidence || human.evidenceText || "").trim();
+  const evidenceLabel = String(human.evidenceLabel || human.pathLabel || "").trim();
+  const path = human.pathId || human.pathLabel
+    ? { pathId: human.pathId || "", pathLabel: human.pathLabel || evidenceLabel }
+    : humanSupportPath(evidence);
+  const directionValue = String(human.directionValue || human.humanDirectionValue || "").trim();
+  const directionLabel = String(human.directionLabel || human.humanDirection || "").trim();
+  const stageValue = String(human.stageValue || human.humanStageValue || "").trim();
+  const stageLabel = String(human.stageLabel || human.humanStage || "").trim();
+  const finiteOrNull = (value) => {
+    if (value == null || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  };
+  let close = finiteOrNull(context.close);
+  if (close == null) {
+    try {
+      close = Number(currentReplayCandle()?.close || 0);
+    } catch (error) {
+      close = 0;
+    }
+  }
+  let stopPct = finiteOrNull(copy.bypassStopLossPct);
+  if (stopPct == null) stopPct = finiteOrNull(copy.stopRiskPct);
+  let riskReward = finiteOrNull(copy.bypassRiskReward);
+  const stop = Number(copy.stopLoss || 0);
+  const resistance = Number(copy.pressurePlan?.price || copy.pressurePlan?.level?.price || 0);
+  const resistanceKnown = resistance > close && close > 0;
+  if (stopPct == null && close > stop && stop > 0) stopPct = ((close - stop) / close) * 100;
+  if (riskReward == null && close > stop && stop > 0 && resistanceKnown) riskReward = (resistance - close) / (close - stop);
+  if (stopPct != null) copy.bypassStopLossPct = Number(stopPct.toFixed(2));
+  if (riskReward != null) copy.bypassRiskReward = Number(riskReward.toFixed(2));
+  const geometryOk = stopPct != null && stopPct >= 3 - 1e-6 && stopPct <= 8 + 1e-6 && riskReward != null && riskReward >= 3 - 1e-8;
+  const geometryText = `盈亏比 ${riskReward == null ? "未计算" : riskReward.toFixed(2)}（需至少3），止损 ${stopPct == null ? "未计算" : `${stopPct.toFixed(2)}%`}（约3%到8%）`;
+  const validated = new Set(["真实支撑", "已验证", "validated"]);
+  const watchStatuses = new Set(["待验证", "候选", "验证中", "跌破后收回", "candidate", "testing", "reclaimed"]);
+  const invalidStatuses = new Set(["失效", "已失效", "已过期", "broken", "expired", "invalidated"]);
+  const labels = {
+    "候选": "待验证",
+    "candidate": "待验证",
+    "待验证": "待验证",
+    "验证中": "验证中",
+    "testing": "验证中",
+    "真实支撑": "真实支撑",
+    "已验证": "真实支撑",
+    "validated": "真实支撑",
+    "失效": "失效",
+    "已失效": "失效",
+    "broken": "失效",
+    "invalidated": "失效",
+    "跌破后收回": "跌破后收回",
+    "reclaimed": "跌破后收回",
+    "已过期": "已过期",
+    "expired": "已过期",
+  };
+  const codes = {
+    "待验证": "candidate",
+    "验证中": "testing",
+    "真实支撑": "validated",
+    "失效": "invalidated",
+    "跌破后收回": "reclaimed",
+    "已过期": "expired",
+  };
+  const protectPosition = copy.side === "sell" || copy.action === "sell" || copy.action === "hold_position";
+  const lockScores = () => {
+    copy.score = lockedScore;
+    copy.model = lockedModel;
+    copy.matched = lockedMatched;
+    copy.participatesInScoring = lockedParticipates;
+    return copy;
+  };
+  const setWatch = (reason) => {
+    copy.bypassBuyEligible = false;
+    copy.bypassBuyReason = reason;
+    if (!protectPosition) {
+      copy.action = "watch";
+      copy.actionText = "建议观望";
+    }
+  };
+  const setBuy = (reason) => {
+    copy.bypassBuyEligible = true;
+    copy.bypassBuyReason = reason;
+    if (!protectPosition) {
+      copy.action = "buy";
+      copy.actionText = "建议买入";
+    }
+  };
+  const overlayValidation = (label, mappedStatus, reason) => {
+    const previous = copy.bypassSupportValidation && typeof copy.bypassSupportValidation === "object" ? copy.bypassSupportValidation : {};
+    copy.bypassSupportValidation = {
+      ...previous,
+      status: mappedStatus,
+      label,
+      pathId: path.pathId || "",
+      pathLabel: path.pathLabel || "",
+      validationReason: reason,
+      supportValidationReason: reason,
+      participatesInScoring: false,
+    };
+  };
+
+  if (!status) {
+    if (copy.bypassBuyEligible === true && geometryOk) {
+      setBuy(copy.bypassBuyReason || `跟随系统旁路：支撑已验证。${geometryText}。不替换原买入模型评分。`);
+    } else if (copy.action === "buy") {
+      const prior = copy.bypassBuyReason ? `${copy.bypassBuyReason} ` : "";
+      setWatch(`跟随系统旁路未通过：需要真实支撑、盈亏比至少3、止损约3%到8%。${prior}${geometryText}。原评分不变。`);
+    } else {
+      copy.bypassBuyEligible = false;
+    }
+  } else {
+    const label = labels[status] || status;
+    const mappedStatus = codes[label] || "candidate";
+    const shownEvidence = evidenceLabel || path.pathLabel || evidence;
+    if (validated.has(status)) {
+      overlayValidation(label, "validated", shownEvidence);
+      if (!evidence) {
+        setWatch("人工标注为真实支撑，但支撑验证依据为空，不允许买入。原评分不变。");
+      } else if (!geometryOk) {
+        setWatch(`人工真实支撑。验证原因：${shownEvidence}。买入未通过：${geometryText}。原评分不变。`);
+      } else {
+        setBuy(`人工真实支撑。验证原因：${shownEvidence}。${geometryText}，当前满足。不替换原买入模型评分。`);
+      }
+    } else if (watchStatuses.has(status)) {
+      overlayValidation(label, mappedStatus, shownEvidence ? `人工标注为${label}。依据：${shownEvidence}。尚未升为真实支撑。` : `人工标注为${label}，尚未升为真实支撑。`);
+      setWatch(`人工支撑状态：${label}。即使原评分达到买入线，也先观望。原评分不变。`);
+    } else if (invalidStatuses.has(status)) {
+      overlayValidation(label, mappedStatus, shownEvidence ? `人工标注为${label}。依据：${shownEvidence}。` : `人工标注为${label}，支撑不再作为买入依据。`);
+      setWatch(`人工支撑状态：${label}。买入建议改为观望。原评分不变。`);
+    } else {
+      overlayValidation(label, mappedStatus, shownEvidence || `人工支撑状态：${label}。`);
+      setWatch(`人工支撑状态：${label}。未确认为真实支撑，买入建议改为观望。原评分不变。`);
+    }
+  }
+
+  const originalDirection = copy.modelTrendDirection || copy.trendDirection || "";
+  const originalStage = copy.modelTrendStage || copy.trendStage || "";
+  copy.modelTrendDirection = originalDirection;
+  copy.modelTrendStage = originalStage;
+  if (directionLabel) copy.trendDirection = directionLabel;
+  if (stageLabel) {
+    copy.trendStage = stageLabel;
+    copy.stage = stageLabel;
+  }
+  const repairStages = new Set(["下跌趋势中的超跌反弹", "下跌趋势修复", "震荡筑底", "突破确认", "回踩确认"]);
+  const confirmationStages = new Set(["突破确认", "回踩确认"]);
+  const humanDown = directionValue === "down" || stageValue === "downtrend_continuation";
+  const humanUp = directionValue === "up" || stageValue === "uptrend_continuation";
+  const humanRange = directionValue === "range" || stageValue === "range_arbitrage";
+  const humanTransition = directionValue === "transition" || stageValue === "trend_transition";
+  const humanRepair = repairStages.has(stageLabel);
+  const held = copy.side === "sell" || copy.action === "sell" || copy.action === "hold_position";
+  if (!directionValue && !stageValue) {
+    const shownDirection = copy.trendDirection || "";
+    const shownStage = copy.trendStage || "";
+    copy.trendBiasNote = shownDirection
+      ? `趋势跟随系统：${shownDirection}${shownStage ? ` / ${shownStage}` : ""}。买卖动作由支撑验证旁路决定，不改原评分。`
+      : "";
+  } else if (!held && humanDown && !humanRepair) {
+    copy.action = "watch";
+    copy.actionText = "建议观望";
+    copy.bypassBuyEligible = false;
+    copy.trendBiasNote = `人工趋势为下跌${stageLabel ? `（${stageLabel}）` : ""}。下跌延续不直接买入，原评分不变。`;
+  } else if (!held && humanTransition && !confirmationStages.has(stageLabel)) {
+    if (copy.action === "buy") {
+      copy.action = "watch";
+      copy.actionText = "建议观望";
+      copy.bypassBuyEligible = false;
+    }
+    copy.trendBiasNote = `人工趋势为趋势转换中${stageLabel ? `（${stageLabel}）` : ""}。未确认突破或回踩前不直接买入，原评分不变。`;
+  } else if (!held && humanDown && humanRepair) {
+    copy.trendBiasNote = `人工趋势为下跌中的${stageLabel}。买入仍只看真实支撑、盈亏比至少3和止损约3%到8%，不改原评分。`;
+  } else if (!held && (humanUp || humanRange)) {
+    copy.trendBiasNote = `人工趋势为${directionLabel || stageLabel}。买入资格仍由支撑验证、盈亏比和止损决定，不改原评分。`;
+  } else if (held && humanDown) {
+    if (copy.action === "hold_position" && resistanceKnown) {
+      copy.action = "sell";
+      copy.actionText = "建议卖出";
+      copy.trendBiasNote = `人工趋势为下跌。上方已有压力 ${resistance.toFixed(2)}，持仓建议改为卖出。原评分不变。`;
+    } else if (copy.action === "hold_position") {
+      copy.trendBiasNote = "人工趋势为下跌。没有高于现价的压力，不另造卖点，继续持有。原评分不变。";
+    } else {
+      copy.trendBiasNote = "人工趋势为下跌。卖出建议保持，反弹遇已有压力优先兑现。原评分不变。";
+    }
+  } else if (held && humanUp) {
+    if (copy.action === "sell") {
+      copy.action = "hold_position";
+      copy.actionText = "继续持有";
+      copy.trendBiasNote = "人工趋势为上涨。不因接近压力改为卖出，继续持有。原评分不变。";
+    } else {
+      copy.trendBiasNote = "人工趋势为上涨。持仓不因接近压力单独卖出。原评分不变。";
+    }
+  } else if (held && humanRange && copy.action === "hold_position" && resistanceKnown && (resistance - close) / close <= 0.02) {
+    copy.action = "sell";
+    copy.actionText = "建议卖出";
+    copy.trendBiasNote = `人工趋势为盘整。价格已接近已有压力 ${resistance.toFixed(2)}，持仓建议改为卖出。原评分不变。`;
+  } else if (held && humanRange) {
+    copy.trendBiasNote = "人工趋势为盘整。打到已有区间上沿再卖；没有可用压力时不改卖出动作。原评分不变。";
+  } else {
+    copy.trendBiasNote = `人工趋势：${directionLabel || "跟随系统"}${stageLabel ? ` / ${stageLabel}` : ""}。原评分不变。`;
+  }
+
+  if (!copy.autoAction) {
+    copy.autoAction = copy.action || "";
+    copy.autoActionText = copy.actionText || "";
+  }
+  const sellValue = String(human.sellCorrection || human.humanSellCorrection || "").trim();
+  const sellLabelInput = String(human.sellCorrectionLabel || human.humanSellLabel || "").trim();
+  const sellSpecs = {
+    stop_loss: { kind: "sell", label: "止损" },
+    "止损": { kind: "sell", label: "止损" },
+    breakeven_stop: { kind: "sell", label: "保本止损" },
+    "保本止损": { kind: "sell", label: "保本止损" },
+    take_profit: { kind: "sell", label: "止盈" },
+    "止盈": { kind: "sell", label: "止盈" },
+    hold_no_sell: { kind: "hold", label: "观望-不卖" },
+    "观望-不卖": { kind: "hold", label: "观望-不卖" },
+  };
+  const sellSpec = sellSpecs[sellValue] || sellSpecs[sellLabelInput] || null;
+  if (!sellSpec) {
+    copy.humanSellCorrection = "";
+    copy.humanSellLabel = "";
+    copy.sellCorrectionReason = "";
+  } else {
+    copy.humanSellCorrection = sellValue || sellSpec.label;
+    copy.humanSellLabel = sellSpec.label;
+    if (sellSpec.kind === "sell") {
+      copy.action = "sell";
+      copy.actionText = "建议卖出";
+    } else if (copy.action !== "buy") {
+      const stayInPosition = copy.side === "sell" || copy.action === "sell" || copy.action === "hold_position" || copy.autoAction === "sell" || copy.autoAction === "hold_position";
+      copy.action = stayInPosition ? "hold_position" : "watch";
+      copy.actionText = stayInPosition ? "继续持有" : "建议观望";
+    }
+    copy.sellCorrectionReason = `人工卖出修正：${sellSpec.label}。训练采用该卖出结果，原评分、模型和匹配特征不变。`;
+  }
+  return lockScores();
+}
+
+function trainingDecisionFromAdvice(advice, action, reason, note) {
+  const correction = String(advice?.humanSellCorrection || "").trim();
+  const autoAdviceAction = advice?.autoAction || "";
+  const autoAdviceText = advice?.autoActionText || "";
+  if (!correction) {
+    return {
+      action,
+      reason,
+      note,
+      humanSellCorrection: "",
+      humanSellLabel: "",
+      autoAdviceAction,
+      autoAdviceText,
+    };
+  }
+  const label = advice.humanSellLabel || "";
+  const humanReason = String(advice.sellCorrectionReason || label || "").trim();
+  const cancelsSellOnly = correction === "hold_no_sell" || label === "观望-不卖";
+  if (cancelsSellOnly && advice.action === "buy") {
+    return {
+      action,
+      reason,
+      note,
+      humanSellCorrection: correction,
+      humanSellLabel: label,
+      autoAdviceAction,
+      autoAdviceText,
+    };
+  }
+  const humanAction = advice.action === "sell" ? "sell" : advice.action === "buy" ? "buy" : "hold";
+  return {
+    action: humanAction,
+    reason: humanReason || reason,
+    note: humanReason || note || reason || "",
+    humanSellCorrection: correction,
+    humanSellLabel: label,
+    autoAdviceAction,
+    autoAdviceText,
   };
 }
 
@@ -1528,5 +2197,5 @@ function ruleLibraryAdvice() {
     return attachStructureRecognition(ruleLibraryAdvice(), history);
   }
 
-  return { analyze, recognizeMarketStructure, version: "frontend-rule-library-v1" };
+  return { analyze, recognizeMarketStructure, applyHumanReplayOverrides, trainingDecisionFromAdvice, version: "frontend-rule-library-v1" };
 });
