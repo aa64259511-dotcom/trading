@@ -1059,6 +1059,271 @@ function attachStructureRecognition(advice, history) {
   };
 }
 
+function humanSupportPath(evidence) {
+  const table = {
+    "急跌修复": ["fast_drop_repair", "急跌修复"],
+    "跌破后回踩确认": ["reclaim_retest_bullish", "跌破后回踩确认"],
+    "多次回踩反弹": ["reclaim_retest_bullish", "多次回踩反弹"],
+    "multiple_retests": ["reclaim_retest_bullish", "多次回踩反弹"],
+    "假跌破后收回": ["reclaim_retest_bullish", "假跌破后收回"],
+    "false_break_reclaim": ["reclaim_retest_bullish", "假跌破后收回"],
+    "底部形态": ["bottom_pattern", "底部形态"],
+    "头肩底": ["bottom_pattern", "底部形态"],
+    "head_shoulders_bottom": ["bottom_pattern", "底部形态"],
+    "平台突破回踩": ["platform_break_retest", "平台突破回踩"],
+    "突破回踩": ["platform_break_retest", "平台突破回踩"],
+    "breakout_retest": ["platform_break_retest", "平台突破回踩"],
+    "人工结构判断": ["", "人工结构判断"],
+    "manual_structure": ["", "人工结构判断"],
+  };
+  const hit = table[String(evidence || "").trim()];
+  if (hit) return { pathId: hit[0], pathLabel: hit[1] };
+  const text = String(evidence || "").trim();
+  return text ? { pathId: "", pathLabel: text } : { pathId: "", pathLabel: "" };
+}
+
+function readHumanReplaySelections() {
+  if (typeof document === "undefined" || typeof humanStructureSelections !== "function") {
+    return {
+      status: "",
+      evidence: "",
+      pathId: "",
+      pathLabel: "",
+      directionValue: "",
+      directionLabel: "",
+      stageValue: "",
+      stageLabel: "",
+    };
+  }
+  const human = humanStructureSelections();
+  const evidenceKey = human.humanEvidenceValue || human.humanEvidence || "";
+  const path = humanSupportPath(evidenceKey);
+  return {
+    status: human.humanSupportValue || "",
+    evidence: evidenceKey,
+    evidenceLabel: human.humanEvidence || path.pathLabel || "",
+    pathId: path.pathId,
+    pathLabel: path.pathLabel || human.humanEvidence || "",
+    directionValue: human.humanDirectionValue || "",
+    directionLabel: human.humanDirection || "",
+    stageValue: human.humanStageValue || "",
+    stageLabel: human.humanStage || "",
+  };
+}
+
+function applyHumanReplayOverrides(advice, humanOverride = null, context = {}) {
+  if (!advice || typeof advice !== "object") return advice;
+  const lockedScore = advice.score;
+  const lockedModel = advice.model;
+  const lockedMatched = advice.matched;
+  const lockedParticipates = advice.participatesInScoring;
+  const copy = { ...advice };
+  const human = humanOverride || readHumanReplaySelections();
+  const status = String(human.status || human.humanSupportStatus || "").trim();
+  const evidence = String(human.evidence || human.humanEvidence || human.evidenceText || "").trim();
+  const evidenceLabel = String(human.evidenceLabel || human.pathLabel || "").trim();
+  const path = human.pathId || human.pathLabel
+    ? { pathId: human.pathId || "", pathLabel: human.pathLabel || evidenceLabel }
+    : humanSupportPath(evidence);
+  const directionValue = String(human.directionValue || human.humanDirectionValue || "").trim();
+  const directionLabel = String(human.directionLabel || human.humanDirection || "").trim();
+  const stageValue = String(human.stageValue || human.humanStageValue || "").trim();
+  const stageLabel = String(human.stageLabel || human.humanStage || "").trim();
+  const finiteOrNull = (value) => {
+    if (value == null || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  };
+  let close = finiteOrNull(context.close);
+  if (close == null) {
+    try {
+      close = Number(currentReplayCandle()?.close || 0);
+    } catch (error) {
+      close = 0;
+    }
+  }
+  let stopPct = finiteOrNull(copy.bypassStopLossPct);
+  if (stopPct == null) stopPct = finiteOrNull(copy.stopRiskPct);
+  let riskReward = finiteOrNull(copy.bypassRiskReward);
+  const stop = Number(copy.stopLoss || 0);
+  const resistance = Number(copy.pressurePlan?.price || copy.pressurePlan?.level?.price || 0);
+  const resistanceKnown = resistance > close && close > 0;
+  if (stopPct == null && close > stop && stop > 0) stopPct = ((close - stop) / close) * 100;
+  if (riskReward == null && close > stop && stop > 0 && resistanceKnown) riskReward = (resistance - close) / (close - stop);
+  if (stopPct != null) copy.bypassStopLossPct = Number(stopPct.toFixed(2));
+  if (riskReward != null) copy.bypassRiskReward = Number(riskReward.toFixed(2));
+  const geometryOk = stopPct != null && stopPct >= 3 - 1e-6 && stopPct <= 8 + 1e-6 && riskReward != null && riskReward >= 3 - 1e-8;
+  const geometryText = `盈亏比 ${riskReward == null ? "未计算" : riskReward.toFixed(2)}（需至少3），止损 ${stopPct == null ? "未计算" : `${stopPct.toFixed(2)}%`}（约3%到8%）`;
+  const validated = new Set(["真实支撑", "已验证", "validated"]);
+  const watchStatuses = new Set(["待验证", "候选", "验证中", "跌破后收回", "candidate", "testing", "reclaimed"]);
+  const invalidStatuses = new Set(["失效", "已失效", "已过期", "broken", "expired", "invalidated"]);
+  const labels = {
+    "候选": "待验证",
+    "candidate": "待验证",
+    "待验证": "待验证",
+    "验证中": "验证中",
+    "testing": "验证中",
+    "真实支撑": "真实支撑",
+    "已验证": "真实支撑",
+    "validated": "真实支撑",
+    "失效": "失效",
+    "已失效": "失效",
+    "broken": "失效",
+    "invalidated": "失效",
+    "跌破后收回": "跌破后收回",
+    "reclaimed": "跌破后收回",
+    "已过期": "已过期",
+    "expired": "已过期",
+  };
+  const codes = {
+    "待验证": "candidate",
+    "验证中": "testing",
+    "真实支撑": "validated",
+    "失效": "invalidated",
+    "跌破后收回": "reclaimed",
+    "已过期": "expired",
+  };
+  const protectPosition = copy.side === "sell" || copy.action === "sell" || copy.action === "hold_position";
+  const lockScores = () => {
+    copy.score = lockedScore;
+    copy.model = lockedModel;
+    copy.matched = lockedMatched;
+    copy.participatesInScoring = lockedParticipates;
+    return copy;
+  };
+  const setWatch = (reason) => {
+    copy.bypassBuyEligible = false;
+    copy.bypassBuyReason = reason;
+    if (!protectPosition) {
+      copy.action = "watch";
+      copy.actionText = "建议观望";
+    }
+  };
+  const setBuy = (reason) => {
+    copy.bypassBuyEligible = true;
+    copy.bypassBuyReason = reason;
+    if (!protectPosition) {
+      copy.action = "buy";
+      copy.actionText = "建议买入";
+    }
+  };
+  const overlayValidation = (label, mappedStatus, reason) => {
+    const previous = copy.bypassSupportValidation && typeof copy.bypassSupportValidation === "object" ? copy.bypassSupportValidation : {};
+    copy.bypassSupportValidation = {
+      ...previous,
+      status: mappedStatus,
+      label,
+      pathId: path.pathId || "",
+      pathLabel: path.pathLabel || "",
+      validationReason: reason,
+      supportValidationReason: reason,
+      participatesInScoring: false,
+    };
+  };
+
+  if (!status) {
+    if (copy.bypassBuyEligible === true && geometryOk) {
+      setBuy(copy.bypassBuyReason || `跟随系统旁路：支撑已验证。${geometryText}。不替换原买入模型评分。`);
+    } else if (copy.action === "buy") {
+      const prior = copy.bypassBuyReason ? `${copy.bypassBuyReason} ` : "";
+      setWatch(`跟随系统旁路未通过：需要真实支撑、盈亏比至少3、止损约3%到8%。${prior}${geometryText}。原评分不变。`);
+    } else {
+      copy.bypassBuyEligible = false;
+    }
+  } else {
+    const label = labels[status] || status;
+    const mappedStatus = codes[label] || "candidate";
+    const shownEvidence = evidenceLabel || path.pathLabel || evidence;
+    if (validated.has(status)) {
+      overlayValidation(label, "validated", shownEvidence);
+      if (!evidence) {
+        setWatch("人工标注为真实支撑，但支撑验证依据为空，不允许买入。原评分不变。");
+      } else if (!geometryOk) {
+        setWatch(`人工真实支撑。验证原因：${shownEvidence}。买入未通过：${geometryText}。原评分不变。`);
+      } else {
+        setBuy(`人工真实支撑。验证原因：${shownEvidence}。${geometryText}，当前满足。不替换原买入模型评分。`);
+      }
+    } else if (watchStatuses.has(status)) {
+      overlayValidation(label, mappedStatus, shownEvidence ? `人工标注为${label}。依据：${shownEvidence}。尚未升为真实支撑。` : `人工标注为${label}，尚未升为真实支撑。`);
+      setWatch(`人工支撑状态：${label}。即使原评分达到买入线，也先观望。原评分不变。`);
+    } else if (invalidStatuses.has(status)) {
+      overlayValidation(label, mappedStatus, shownEvidence ? `人工标注为${label}。依据：${shownEvidence}。` : `人工标注为${label}，支撑不再作为买入依据。`);
+      setWatch(`人工支撑状态：${label}。买入建议改为观望。原评分不变。`);
+    } else {
+      overlayValidation(label, mappedStatus, shownEvidence || `人工支撑状态：${label}。`);
+      setWatch(`人工支撑状态：${label}。未确认为真实支撑，买入建议改为观望。原评分不变。`);
+    }
+  }
+
+  const originalDirection = copy.modelTrendDirection || copy.trendDirection || "";
+  const originalStage = copy.modelTrendStage || copy.trendStage || "";
+  copy.modelTrendDirection = originalDirection;
+  copy.modelTrendStage = originalStage;
+  if (directionLabel) copy.trendDirection = directionLabel;
+  if (stageLabel) {
+    copy.trendStage = stageLabel;
+    copy.stage = stageLabel;
+  }
+  const repairStages = new Set(["下跌趋势中的超跌反弹", "下跌趋势修复", "震荡筑底", "突破确认", "回踩确认"]);
+  const confirmationStages = new Set(["突破确认", "回踩确认"]);
+  const humanDown = directionValue === "down" || stageValue === "downtrend_continuation";
+  const humanUp = directionValue === "up" || stageValue === "uptrend_continuation";
+  const humanRange = directionValue === "range" || stageValue === "range_arbitrage";
+  const humanTransition = directionValue === "transition" || stageValue === "trend_transition";
+  const humanRepair = repairStages.has(stageLabel);
+  const held = copy.side === "sell" || copy.action === "sell" || copy.action === "hold_position";
+  if (!directionValue && !stageValue) {
+    const shownDirection = copy.trendDirection || "";
+    const shownStage = copy.trendStage || "";
+    copy.trendBiasNote = shownDirection
+      ? `趋势跟随系统：${shownDirection}${shownStage ? ` / ${shownStage}` : ""}。买卖动作由支撑验证旁路决定，不改原评分。`
+      : "";
+  } else if (!held && humanDown && !humanRepair) {
+    copy.action = "watch";
+    copy.actionText = "建议观望";
+    copy.bypassBuyEligible = false;
+    copy.trendBiasNote = `人工趋势为下跌${stageLabel ? `（${stageLabel}）` : ""}。下跌延续不直接买入，原评分不变。`;
+  } else if (!held && humanTransition && !confirmationStages.has(stageLabel)) {
+    if (copy.action === "buy") {
+      copy.action = "watch";
+      copy.actionText = "建议观望";
+      copy.bypassBuyEligible = false;
+    }
+    copy.trendBiasNote = `人工趋势为趋势转换中${stageLabel ? `（${stageLabel}）` : ""}。未确认突破或回踩前不直接买入，原评分不变。`;
+  } else if (!held && humanDown && humanRepair) {
+    copy.trendBiasNote = `人工趋势为下跌中的${stageLabel}。买入仍只看真实支撑、盈亏比至少3和止损约3%到8%，不改原评分。`;
+  } else if (!held && (humanUp || humanRange)) {
+    copy.trendBiasNote = `人工趋势为${directionLabel || stageLabel}。买入资格仍由支撑验证、盈亏比和止损决定，不改原评分。`;
+  } else if (held && humanDown) {
+    if (copy.action === "hold_position" && resistanceKnown) {
+      copy.action = "sell";
+      copy.actionText = "建议卖出";
+      copy.trendBiasNote = `人工趋势为下跌。上方已有压力 ${resistance.toFixed(2)}，持仓建议改为卖出。原评分不变。`;
+    } else if (copy.action === "hold_position") {
+      copy.trendBiasNote = "人工趋势为下跌。没有高于现价的压力，不另造卖点，继续持有。原评分不变。";
+    } else {
+      copy.trendBiasNote = "人工趋势为下跌。卖出建议保持，反弹遇已有压力优先兑现。原评分不变。";
+    }
+  } else if (held && humanUp) {
+    if (copy.action === "sell") {
+      copy.action = "hold_position";
+      copy.actionText = "继续持有";
+      copy.trendBiasNote = "人工趋势为上涨。不因接近压力改为卖出，继续持有。原评分不变。";
+    } else {
+      copy.trendBiasNote = "人工趋势为上涨。持仓不因接近压力单独卖出。原评分不变。";
+    }
+  } else if (held && humanRange && copy.action === "hold_position" && resistanceKnown && (resistance - close) / close <= 0.02) {
+    copy.action = "sell";
+    copy.actionText = "建议卖出";
+    copy.trendBiasNote = `人工趋势为盘整。价格已接近已有压力 ${resistance.toFixed(2)}，持仓建议改为卖出。原评分不变。`;
+  } else if (held && humanRange) {
+    copy.trendBiasNote = "人工趋势为盘整。打到已有区间上沿再卖；没有可用压力时不改卖出动作。原评分不变。";
+  } else {
+    copy.trendBiasNote = `人工趋势：${directionLabel || "跟随系统"}${stageLabel ? ` / ${stageLabel}` : ""}。原评分不变。`;
+  }
+  return lockScores();
+}
+
 function ruleLibraryAdvice() {
   const history = replayDailyHistory();
   const candle = history.at(-1);
@@ -1852,5 +2117,5 @@ function ruleLibraryAdvice() {
     return attachStructureRecognition(ruleLibraryAdvice(), history);
   }
 
-  return { analyze, recognizeMarketStructure, version: "frontend-rule-library-v1" };
+  return { analyze, recognizeMarketStructure, applyHumanReplayOverrides, version: "frontend-rule-library-v1" };
 });

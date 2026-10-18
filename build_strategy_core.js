@@ -44,6 +44,9 @@ const extracted = [
   "manualSupportPrice",
   "recognizeMarketStructure",
   "attachStructureRecognition",
+  "humanSupportPath",
+  "readHumanReplaySelections",
+  "applyHumanReplayOverrides",
   "ruleLibraryAdvice",
 ].map(extractFunction).join("\n\n");
 
@@ -148,7 +151,7 @@ ${extracted}
     return attachStructureRecognition(ruleLibraryAdvice(), history);
   }
 
-  return { analyze, recognizeMarketStructure, version: "frontend-rule-library-v1" };
+  return { analyze, recognizeMarketStructure, applyHumanReplayOverrides, version: "frontend-rule-library-v1" };
 });
 `;
 

@@ -247,6 +247,122 @@ assert.ok(!generated.includes("weeklyTrendDirection"));
 assert.ok(!generated.includes("sellTrendBiasNote"));
 assert.ok(generated.includes("evaluateSupportPathValidation"));
 assert.ok(generated.includes("buildBypassBuyGate"));
+assert.ok(generated.includes("function applyHumanReplayOverrides("));
+assert.ok(!adviceSource.includes("applyHumanReplayOverrides"));
+
+function overrideBase(extra = {}) {
+  return {
+    side: "buy",
+    action: "buy",
+    actionText: "建议买入",
+    stage: "上涨延续",
+    model: "趋势模型",
+    score: 88,
+    matched: ["原模型"],
+    participatesInScoring: false,
+    stopLoss: 95,
+    stopRiskPct: 5,
+    pressurePlan: { price: 120 },
+    bypassBuyEligible: false,
+    bypassRiskReward: null,
+    bypassStopLossPct: null,
+    trendDirection: "上涨",
+    trendStage: "上涨延续",
+    ...extra,
+  };
+}
+const overrideClose = { close: 100 };
+const validatedHuman = { status: "真实支撑", evidence: "急跌修复", evidenceLabel: "急跌修复" };
+const bought = core.applyHumanReplayOverrides(overrideBase(), validatedHuman, overrideClose);
+assert.strictEqual(bought.action, "buy");
+assert.strictEqual(bought.actionText, "建议买入");
+assert.strictEqual(bought.score, 88);
+assert.strictEqual(bought.model, "趋势模型");
+assert.deepStrictEqual(bought.matched, ["原模型"]);
+assert.strictEqual(bought.bypassBuyEligible, true);
+assert.ok(bought.bypassRiskReward >= 3);
+
+const noEvidence = core.applyHumanReplayOverrides(overrideBase(), { status: "validated", evidence: "" }, overrideClose);
+assert.strictEqual(noEvidence.action, "watch");
+assert.strictEqual(noEvidence.score, 88);
+
+const pendingOverride = core.applyHumanReplayOverrides(overrideBase(), { status: "testing", evidence: "急跌修复" }, overrideClose);
+assert.strictEqual(pendingOverride.action, "watch");
+assert.strictEqual(pendingOverride.actionText, "建议观望");
+assert.strictEqual(pendingOverride.score, 88);
+
+const broken = core.applyHumanReplayOverrides(overrideBase(), { status: "broken", evidence: "急跌修复" }, overrideClose);
+assert.strictEqual(broken.action, "watch");
+
+const noResistance = core.applyHumanReplayOverrides(overrideBase({ pressurePlan: null, stopLoss: 95 }), validatedHuman, overrideClose);
+assert.strictEqual(noResistance.action, "watch");
+assert.ok(noResistance.bypassBuyReason.includes("未计算"));
+assert.ok(!noResistance.bypassBuyReason.includes("120"));
+
+const followBypass = core.applyHumanReplayOverrides(overrideBase({ bypassBuyEligible: true }), { status: "" }, overrideClose);
+assert.strictEqual(followBypass.action, "buy");
+assert.strictEqual(followBypass.score, 88);
+
+const followBlocked = core.applyHumanReplayOverrides(overrideBase({ bypassBuyEligible: false }), { status: "" }, overrideClose);
+assert.strictEqual(followBlocked.action, "watch");
+
+const downBlocked = core.applyHumanReplayOverrides(overrideBase(), {
+  ...validatedHuman,
+  directionValue: "down",
+  directionLabel: "下跌",
+  stageValue: "downtrend_continuation",
+  stageLabel: "下跌趋势延续",
+}, overrideClose);
+assert.strictEqual(downBlocked.action, "watch");
+assert.strictEqual(downBlocked.trendDirection, "下跌");
+assert.strictEqual(downBlocked.trendStage, "下跌趋势延续");
+assert.strictEqual(downBlocked.score, 88);
+assert.ok(downBlocked.trendBiasNote.includes("下跌"));
+
+const rebound = core.applyHumanReplayOverrides(overrideBase(), {
+  ...validatedHuman,
+  directionValue: "down",
+  directionLabel: "下跌",
+  stageValue: "oversold_rebound",
+  stageLabel: "下跌趋势中的超跌反弹",
+}, overrideClose);
+assert.strictEqual(rebound.action, "buy");
+assert.ok(rebound.trendBiasNote.includes("超跌反弹"));
+
+const held = core.applyHumanReplayOverrides(overrideBase({
+  side: "sell",
+  action: "hold_position",
+  actionText: "继续持有",
+}), { status: "candidate", evidence: "" }, overrideClose);
+assert.strictEqual(held.action, "hold_position");
+assert.strictEqual(held.score, 88);
+
+const heldSell = core.applyHumanReplayOverrides(overrideBase({
+  side: "sell",
+  action: "hold_position",
+  actionText: "继续持有",
+}), { status: "", directionValue: "down", directionLabel: "下跌" }, overrideClose);
+assert.strictEqual(heldSell.action, "sell");
+assert.strictEqual(heldSell.actionText, "建议卖出");
+assert.strictEqual(heldSell.score, 88);
+
+const noFakeSell = core.applyHumanReplayOverrides(overrideBase({
+  side: "sell",
+  action: "hold_position",
+  actionText: "继续持有",
+  pressurePlan: null,
+}), { status: "", directionValue: "down", directionLabel: "下跌" }, overrideClose);
+assert.strictEqual(noFakeSell.action, "hold_position");
+assert.ok(noFakeSell.trendBiasNote.includes("不另造卖点"));
+
+const upHold = core.applyHumanReplayOverrides(overrideBase({
+  side: "sell",
+  action: "sell",
+  actionText: "建议卖出",
+}), { status: "", directionValue: "up", directionLabel: "上涨" }, overrideClose);
+assert.strictEqual(upHold.action, "hold_position");
+assert.strictEqual(upHold.actionText, "继续持有");
+assert.strictEqual(upHold.score, 88);
 
 console.log("structure recognition checks passed");
 console.log(JSON.stringify({
