@@ -139,6 +139,578 @@ function ruleRiskRewardLine(candle, supportPrice, resistancePrice, fallbackStop 
   };
 }
 
+function evaluateWeeklyTrendStructure(dailyBars = []) {
+  const bars = (Array.isArray(dailyBars) ? dailyBars : []).filter((bar) => {
+    return bar && Number(bar.close) > 0 && Number(bar.high) > 0 && Number(bar.low) > 0;
+  });
+  const asOfDate = bars.at(-1)?.date || "";
+  const emptyZones = { support: null, resistance: null, spanPct: null, supportPrice: null, resistancePrice: null };
+  const blank = (basis, stage = "周线不足") => ({
+    weeklyTrendDirection: "",
+    weeklyTrendStage: stage,
+    weeklyTrendStrength: "",
+    weeklyTrendBasis: basis,
+    zones: emptyZones,
+    turnCount: 0,
+    participatesInScoring: false,
+    asOfDate,
+  });
+  if (bars.length < 20) {
+    return blank("可用K线不足，周线方向和阶段未判定。该结果不参与评分。");
+  }
+  const weeks = dailyToWeeklyCandles(bars).filter((week) => week && week.date && (!asOfDate || week.date <= asOfDate));
+  if (weeks.length < 8) {
+    return blank(`截至 ${asOfDate || "--"} 只有 ${weeks.length} 根已收盘周线，周线结构随分析日更新，当前不足以判定。不参与评分。`);
+  }
+
+  function meanOf(items, selector) {
+    return average(items, selector);
+  }
+
+  function swingsOf(series, windowSize) {
+    const points = [];
+    if (series.length < windowSize * 2 + 1) return points;
+    for (let index = windowSize; index < series.length - windowSize; index += 1) {
+      const slice = series.slice(index - windowSize, index + windowSize + 1);
+      const bar = series[index];
+      const high = Math.max(...slice.map((item) => Number(item.high)));
+      const low = Math.min(...slice.map((item) => Number(item.low)));
+      if (Number(bar.high) >= high) {
+        points.push({ price: Number(bar.high), date: bar.date || "", index, kind: "swing_high" });
+      }
+      if (Number(bar.low) <= low) {
+        points.push({ price: Number(bar.low), date: bar.date || "", index, kind: "swing_low" });
+      }
+    }
+    return points;
+  }
+
+  function cluster(points) {
+    const sorted = points.filter((point) => point.price > 0).sort((a, b) => a.price - b.price || a.index - b.index);
+    const clusters = [];
+    sorted.forEach((point) => {
+      const last = clusters.at(-1);
+      if (last && Math.abs(point.price - last.price) / last.price <= 0.03) {
+        last.points.push(point);
+        last.price = meanOf(last.points, (item) => item.price);
+        last.lastIndex = Math.max(last.lastIndex, point.index);
+        last.firstIndex = Math.min(last.firstIndex, point.index);
+      } else {
+        clusters.push({ price: point.price, points: [point], lastIndex: point.index, firstIndex: point.index });
+      }
+    });
+    return clusters;
+  }
+
+  function asZone(cluster) {
+    if (!cluster) return null;
+    return {
+      price: Number(cluster.price.toFixed(4)),
+      touches: cluster.points.length,
+      validated: cluster.points.length >= 2,
+      lastDate: weeks[cluster.lastIndex]?.date || "",
+      firstDate: weeks[cluster.firstIndex]?.date || "",
+      zoneLow: Number((cluster.price * 0.985).toFixed(4)),
+      zoneHigh: Number((cluster.price * 1.015).toFixed(4)),
+    };
+  }
+
+  const close = Number(weeks.at(-1).close);
+  const swings = swingsOf(weeks, 2);
+  const highs = swings.filter((point) => point.kind === "swing_high");
+  const lows = swings.filter((point) => point.kind === "swing_low");
+  const highClusters = cluster(highs);
+  const lowClusters = cluster(lows);
+
+  function pickCluster(clusters, side) {
+    if (!clusters.length) return null;
+    const validated = clusters.filter((item) => item.points.length >= 2);
+    const pool = validated.length ? validated : clusters;
+    const sided = side === "support"
+      ? pool.filter((item) => item.price <= close * 1.03)
+      : pool.filter((item) => item.price >= close * 0.97);
+    const list = (sided.length ? sided : pool).slice().sort((a, b) => {
+      const distance = Math.abs(a.price - close) - Math.abs(b.price - close);
+      if (distance) return distance;
+      return b.points.length - a.points.length || b.lastIndex - a.lastIndex;
+    });
+    return list[0] || null;
+  }
+
+  let supportCluster = pickCluster(lowClusters, "support");
+  let resistanceCluster = pickCluster(highClusters, "resistance");
+  if (supportCluster && resistanceCluster && supportCluster.price >= resistanceCluster.price) {
+    supportCluster = lowClusters.filter((item) => item.price < close).sort((a, b) => b.price - a.price)[0] || null;
+    resistanceCluster = highClusters.filter((item) => item.price > close).sort((a, b) => a.price - b.price)[0] || null;
+  }
+  const supportZone = asZone(supportCluster);
+  const resistanceZone = asZone(resistanceCluster);
+  const supportPrice = supportZone?.price || (lows.length ? lows.at(-1).price : null);
+  const resistancePrice = resistanceZone?.price || (highs.length ? highs.at(-1).price : null);
+  const spanPct = supportPrice > 0 && resistancePrice > supportPrice
+    ? ((resistancePrice - supportPrice) / supportPrice) * 100
+    : null;
+  const clampPct = (span, ratio, minPct, maxPct) => {
+    if (!(span > 0)) return minPct;
+    return Math.max(minPct, Math.min(maxPct, span * ratio));
+  };
+  const nearPct = spanPct == null ? 3 : clampPct(spanPct, 0.2, 3, 8);
+  const overshootPct = spanPct == null ? 1.5 : clampPct(spanPct, 0.1, 1.5, 5);
+  const spanOk = spanPct != null && spanPct >= 8 && spanPct <= 50;
+  const nearUpper = (price) => {
+    if (!(resistancePrice > 0)) return false;
+    return price >= resistancePrice * (1 - nearPct / 100) && price <= resistancePrice * (1 + overshootPct / 100);
+  };
+  const nearLower = (price) => {
+    if (!(supportPrice > 0)) return false;
+    return price <= supportPrice * (1 + nearPct / 100) && price >= supportPrice * (1 - overshootPct / 100);
+  };
+  const turns = [];
+  swings.slice().sort((a, b) => a.index - b.index || (a.kind === "swing_low" ? -1 : 1)).forEach((point) => {
+    const side = point.kind === "swing_high" && nearUpper(point.price)
+      ? "upper"
+      : point.kind === "swing_low" && nearLower(point.price)
+        ? "lower"
+        : "";
+    if (!side) return;
+    const last = turns.at(-1);
+    if (last && last.side === side) {
+      const better = side === "upper" ? point.price >= last.price : point.price <= last.price;
+      if (better) turns[turns.length - 1] = { ...point, side };
+      return;
+    }
+    turns.push({ ...point, side });
+  });
+  const turnCount = turns.length;
+  const breakGap = supportPrice > 0 && resistancePrice > supportPrice ? (resistancePrice - supportPrice) * 0.15 : 0;
+  const lastTwo = weeks.slice(-2);
+  const heldUpBreak = Boolean(breakGap > 0 && lastTwo.length >= 2 && lastTwo.every((week) => Number(week.close) > resistancePrice + breakGap));
+  const heldDownBreak = Boolean(breakGap > 0 && lastTwo.length >= 2 && lastTwo.every((week) => Number(week.close) < supportPrice - breakGap));
+  const recentCutoff = Math.max(0, weeks.length - 20);
+  const recentHighs = highs.filter((point) => point.index >= recentCutoff);
+  const recentLows = lows.filter((point) => point.index >= recentCutoff);
+  const lastHighs = (recentHighs.length >= 2 ? recentHighs : highs).slice(-2);
+  const lastLows = (recentLows.length >= 2 ? recentLows : lows).slice(-2);
+  const swingsAreRecent = recentHighs.length >= 2 && recentLows.length >= 2;
+  const higherHighs = swingsAreRecent && lastHighs.length >= 2 && lastHighs[1].price > lastHighs[0].price * 1.01;
+  const higherLows = swingsAreRecent && lastLows.length >= 2 && lastLows[1].price > lastLows[0].price * 1.01;
+  const lowerHighs = swingsAreRecent && lastHighs.length >= 2 && lastHighs[1].price < lastHighs[0].price * 0.99;
+  const lowerLows = swingsAreRecent && lastLows.length >= 2 && lastLows[1].price < lastLows[0].price * 0.99;
+  const earlierClose = Number(weeks[Math.max(0, weeks.length - 13)]?.close || 0);
+  const middleClose = Number(weeks[Math.max(0, weeks.length - 7)]?.close || 0);
+  const latestClose = Number(weeks.at(-1)?.close || 0);
+  let closeSequence = "";
+  if (earlierClose > 0 && middleClose > earlierClose * 1.03 && latestClose > middleClose * 1.03) closeSequence = "上涨";
+  else if (earlierClose > 0 && middleClose < earlierClose * 0.97 && latestClose < middleClose * 0.97) closeSequence = "下跌";
+  else if (earlierClose > 0 && latestClose > earlierClose * 1.12 && latestClose >= middleClose) closeSequence = "上涨";
+  else if (earlierClose > 0 && latestClose < earlierClose * 0.88 && latestClose <= middleClose) closeSequence = "下跌";
+  const zoneStart = Math.min(
+    supportCluster ? supportCluster.firstIndex : weeks.length - 1,
+    resistanceCluster ? resistanceCluster.firstIndex : weeks.length - 1,
+  );
+  const priorIndex = Math.max(0, zoneStart - 15);
+  const priorClose = Number(weeks[priorIndex]?.close || 0);
+  const entryClose = Number(weeks[Math.max(0, zoneStart)]?.close || close);
+  const priorChange = priorClose > 0 ? (entryClose - priorClose) / priorClose : 0;
+  let priorTrend = "";
+  if (priorChange >= 0.08) priorTrend = "上涨";
+  else if (priorChange <= -0.08) priorTrend = "下跌";
+  const contextTag = priorTrend === "上涨" ? "高位盘整" : priorTrend === "下跌" ? "低位盘整" : "";
+
+  let direction = "盘整";
+  let decision = "高低点与突破都不明确，先按盘整。";
+  if (spanOk && turnCount >= 3) {
+    direction = "盘整";
+    decision = `先看区间：上下拐头 ${turnCount} 次，跨度 ${spanPct.toFixed(1)}% 在 8% 到 50% 之间，判为盘整${contextTag ? `，进区间前为${contextTag}` : ""}。`;
+  } else if (heldUpBreak && !heldDownBreak) {
+    direction = "上涨";
+    decision = `周收盘连续 2 周高出压力 ${Number(resistancePrice).toFixed(2)}，超出幅度达到区间跨度的 15%，有效突破，直接判为上涨。`;
+  } else if (heldDownBreak && !heldUpBreak) {
+    direction = "下跌";
+    decision = `周收盘连续 2 周低于支撑 ${Number(supportPrice).toFixed(2)}，超出幅度达到区间跨度的 15%，有效跌破，直接判为下跌。`;
+  } else if (higherHighs && higherLows) {
+    direction = "上涨";
+    decision = "拐头次数不够盘整，近端周线高点和低点同时抬高，判为上涨。";
+  } else if (lowerHighs && lowerLows) {
+    direction = "下跌";
+    decision = "拐头次数不够盘整，近端周线高点和低点同时降低，判为下跌。";
+  } else if (closeSequence) {
+    direction = closeSequence;
+    decision = `近期周线收盘序列转为${closeSequence}，高低点尚未凑够两组，按最近价格行为更新方向。`;
+  } else if (turnCount < 3 && priorTrend) {
+    direction = priorTrend;
+    decision = `拐头只有 ${turnCount} 次，不足以判盘整，参考进入当前区间前 15 周，此前为${priorTrend}。`;
+  } else if (spanPct != null && spanPct < 8) {
+    direction = "盘整";
+    decision = `支撑与压力跨度 ${spanPct.toFixed(1)}% 低于 8%，属于窄幅横盘，不按区间盘整交易，方向标为盘整。`;
+  } else if (spanPct != null && spanPct > 50) {
+    decision = `支撑与压力跨度 ${spanPct.toFixed(1)}% 高于 50%，属于大级别波段，不把整段当成一个盘整区间。`;
+    if (higherHighs && higherLows) {
+      direction = "上涨";
+      decision += "近期高低点抬高，判为上涨。";
+    } else if (lowerHighs && lowerLows) {
+      direction = "下跌";
+      decision += "近期高低点降低，判为下跌。";
+    } else if (priorTrend) {
+      direction = priorTrend;
+      decision += `参考进区间前走势，判为${priorTrend}。`;
+    }
+  }
+
+  const weeklyMa10 = weeks.length >= 10 ? meanOf(weeks.slice(-10), (item) => Number(item.close)) : close;
+  const weeklyMa30 = weeks.length >= 30 ? meanOf(weeks.slice(-30), (item) => Number(item.close)) : weeklyMa10;
+  const weeklyMa10Prev = weeks.length >= 15 ? meanOf(weeks.slice(-15, -5), (item) => Number(item.close)) : weeklyMa10;
+  const ma10Rising = weeklyMa10Prev > 0 && weeklyMa10 > weeklyMa10Prev * 1.002;
+  const ma10Falling = weeklyMa10Prev > 0 && weeklyMa10 < weeklyMa10Prev * 0.998;
+  const maAgreesUp = close >= weeklyMa10 && weeklyMa10 >= weeklyMa30 * 0.998;
+  const maAgreesDown = close <= weeklyMa10 && weeklyMa10 <= weeklyMa30 * 1.002;
+  let waveNote = "";
+  if (highs.length && lows.length) {
+    const lastHigh = highs.at(-1);
+    const prevLow = [...lows].reverse().find((point) => point.index < lastHigh.index);
+    const lastLow = lows.at(-1);
+    const prevHigh = [...highs].reverse().find((point) => point.index < lastLow.index);
+    const rally = prevLow ? (lastHigh.price - prevLow.price) / prevLow.price : 0;
+    const pullback = prevHigh && lastLow.index > prevHigh.index ? (prevHigh.price - lastLow.price) / prevHigh.price : 0;
+    if (direction === "上涨" && pullback > rally && pullback > 0.03) waveNote = "最近回调波段不短于上涨波段，强度下调。";
+    if (direction === "下跌" && rally > Math.max(pullback, 0) && rally > 0.03) waveNote = "最近反弹波段不弱于下跌波段，强度下调。";
+  }
+  let strength = "盘整";
+  if (direction === "上涨") {
+    strength = maAgreesUp && ma10Rising && !waveNote ? "强上涨" : "弱上涨";
+    if (!maAgreesUp) waveNote = `${waveNote}结构与周线均线不一致，以结构为准，标为弱上涨。`.trim();
+  } else if (direction === "下跌") {
+    strength = maAgreesDown && ma10Falling && !waveNote ? "强下跌" : "弱下跌";
+    if (!maAgreesDown) waveNote = `${waveNote}结构与周线均线不一致，以结构为准，标为弱下跌。`.trim();
+  }
+
+  const dailyClose = Number(bars.at(-1).close);
+  const ma20 = meanOf(bars.slice(-Math.min(20, bars.length)), (item) => Number(item.close));
+  const ma60 = meanOf(bars.slice(-Math.min(60, bars.length)), (item) => Number(item.close));
+  const ma120 = meanOf(bars.slice(-Math.min(120, bars.length)), (item) => Number(item.close));
+  const high60 = Math.max(...bars.slice(-Math.min(60, bars.length)).map((item) => Number(item.high)));
+  const high120 = Math.max(...bars.slice(-Math.min(120, bars.length)).map((item) => Number(item.high)));
+  const low20 = Math.min(...bars.slice(-Math.min(20, bars.length)).map((item) => Number(item.low)));
+  const dropFromHigh60 = high60 > 0 ? (high60 - dailyClose) / high60 : 0;
+  const drawdown120 = high120 > 0 ? (high120 - dailyClose) / high120 : 0;
+  const fastDrop = high60 > 0 && (high60 - low20) / high60 >= 0.18;
+  const prevBar = bars.at(-2);
+  const twoUp = Boolean(
+    prevBar
+    && dailyClose > Number(prevBar.close)
+    && dailyClose > Number(bars.at(-1).open)
+    && Number(prevBar.close) > Number(prevBar.open)
+  );
+  const repairing = dailyClose > ma20 || twoUp;
+  let stage = "盘整结构，等待区间边界确认";
+  if (direction === "上涨") {
+    if (fastDrop && repairing) stage = "急跌后修复观察";
+    else if (dropFromHigh60 >= 0.12) stage = "上升趋势中的大调整，等待踩稳确认";
+    else stage = "上升趋势回调/延续观察";
+  } else if (direction === "下跌") {
+    const longPressure = dailyClose < ma60 || dailyClose < ma120;
+    if (fastDrop && repairing) stage = "急跌后修复观察";
+    else if (longPressure && drawdown120 >= 0.2 && repairing) stage = "长期下跌后尝试趋势扭转";
+    else stage = "弱势结构，只做反弹模型";
+  }
+
+  const supportText = supportPrice ? `周线支撑区 ${Number(supportPrice).toFixed(2)}${supportZone?.validated ? "，触碰至少2次" : ""}` : "周线支撑区不足";
+  const resistanceText = resistancePrice ? `周线压力区 ${Number(resistancePrice).toFixed(2)}${resistanceZone?.validated ? "，触碰至少2次" : ""}` : "周线压力区不足";
+  const spanText = spanPct == null ? "跨度不足" : `跨度 ${spanPct.toFixed(1)}%`;
+  const basis = [
+    `截至 ${asOfDate || "--"} 已收盘周线 ${weeks.length} 根，方向和阶段按当时可见周线重算。`,
+    `${supportText}；${resistanceText}；${spanText}；边界附近拐头 ${turnCount} 次。`,
+    decision,
+    `强弱 ${strength}。${waveNote}`,
+    `子阶段 ${stage}。`,
+    "周线结构不参与买卖评分。",
+  ].filter(Boolean).join("");
+
+  return {
+    weeklyTrendDirection: direction,
+    weeklyTrendStage: stage,
+    weeklyTrendStrength: strength,
+    weeklyTrendBasis: basis,
+    zones: {
+      support: supportZone,
+      resistance: resistanceZone,
+      spanPct: spanPct == null ? null : Number(spanPct.toFixed(2)),
+      supportPrice: supportPrice == null ? null : Number(Number(supportPrice).toFixed(4)),
+      resistancePrice: resistancePrice == null ? null : Number(Number(resistancePrice).toFixed(4)),
+    },
+    turnCount,
+    participatesInScoring: false,
+    asOfDate,
+  };
+}
+
+function evaluateSupportPathValidation(history = [], price, meta = {}) {
+  const levelPrice = Number(price);
+  const bars = (Array.isArray(history) ? history : []).filter((bar) => bar && Number(bar.close) > 0 && Number(bar.high) > 0 && Number(bar.low) > 0);
+  const asOfDate = bars.at(-1)?.date || "";
+  const pathLabels = {
+    fast_drop_repair: "急跌修复",
+    reclaim_retest_bullish: "跌破后回踩确认",
+    bottom_pattern: "底部形态",
+    platform_break_retest: "平台突破回踩",
+  };
+  const statusLabels = {
+    candidate: "待验证",
+    testing: "验证中",
+    validated: "真实支撑",
+    invalidated: "失效",
+  };
+  const fallbackReason = `${asOfDate || "当前"} 支撑仍为待验证候选，尚未出现路径确认。`;
+  if (!(levelPrice > 0) || bars.length < 5) {
+    return {
+      status: "candidate",
+      label: "待验证",
+      pathId: "",
+      pathLabel: "",
+      price: levelPrice > 0 ? Number(levelPrice.toFixed(4)) : null,
+      validationReason: fallbackReason,
+      supportValidationReason: fallbackReason,
+      validationHistory: [{ date: asOfDate, status: "candidate", pathId: "", validationReason: fallbackReason }],
+      participatesInScoring: false,
+      asOfDate,
+      source: meta.source || "",
+    };
+  }
+
+  let status = "candidate";
+  let pathId = "";
+  let reason = `${bars[0].date || "起始"} 支撑 ${levelPrice.toFixed(2)} 画出后为待验证候选。`;
+  const validationHistory = [{ date: bars[0].date || "", status, pathId, validationReason: reason }];
+  const commit = (nextStatus, nextPath, bar, text) => {
+    const safeText = String(text || "").trim() || `${bar?.date || asOfDate} 支撑验证状态更新为${statusLabels[nextStatus] || nextStatus}。`;
+    if (nextStatus === status && (nextPath || "") === pathId && safeText === reason) return;
+    status = nextStatus;
+    pathId = nextPath || "";
+    reason = safeText;
+    validationHistory.push({ date: bar?.date || "", status, pathId, validationReason: safeText });
+  };
+
+  let brokeIndex = -1;
+  let reclaimIndex = -1;
+  let consecutiveBull = 0;
+  let platformHigh = null;
+  let platformBreakIndex = -1;
+  let neckline = null;
+  let neckBreakIndex = -1;
+  let secondBottomIndex = -1;
+
+  for (let index = 0; index < bars.length; index += 1) {
+    const bar = bars[index];
+    const open = Number(bar.open);
+    const high = Number(bar.high);
+    const low = Number(bar.low);
+    const close = Number(bar.close);
+    const prev = index ? bars[index - 1] : null;
+    const date = bar.date || "";
+    const bullish = close > open;
+    const upCandle = prev ? close > Number(prev.close) : bullish;
+    const confirming = bullish || upCandle;
+    const confirmText = bullish ? "阳线" : "上涨K线";
+    const near = low <= levelPrice * 1.025 && low >= levelPrice * 0.96;
+    const held = close >= levelPrice * 0.995;
+    const brokeClose = close < levelPrice * 0.985;
+
+    if (brokeClose) {
+      brokeIndex = index;
+      reclaimIndex = -1;
+      platformBreakIndex = -1;
+      neckBreakIndex = -1;
+      consecutiveBull = 0;
+      commit("invalidated", pathId, bar, `${date} 收盘跌破支撑 ${levelPrice.toFixed(2)}，支撑验证状态改为失效。`);
+      continue;
+    }
+    if (brokeIndex >= 0 && reclaimIndex < 0 && close >= levelPrice) {
+      reclaimIndex = index;
+      commit("testing", "reclaim_retest_bullish", bar, `${date} 跌破后收盘重新站回支撑 ${levelPrice.toFixed(2)} 上方，进入验证中，等待后续阳线回踩。`);
+    }
+    if (bullish && (!prev || close >= Number(prev.close))) consecutiveBull += 1;
+    else consecutiveBull = bullish ? 1 : 0;
+
+    if (status !== "validated") {
+      const window = bars.slice(Math.max(0, index - 15), index + 1);
+      let highOffset = 0;
+      window.forEach((item, offset) => {
+        if (Number(item.high) >= Number(window[highOffset].high)) highOffset = offset;
+      });
+      const afterHigh = window.slice(highOffset);
+      const lowAfterHigh = Math.min(...afterHigh.map((item) => Number(item.low)));
+      const dropFromHigh = Number(window[highOffset].high) > 0
+        ? (Number(window[highOffset].high) - lowAfterHigh) / Number(window[highOffset].high)
+        : 0;
+      const fastDrop = highOffset < window.length - 1 && dropFromHigh >= 0.12 && lowAfterHigh <= levelPrice * 1.04;
+      const box = index >= 5 ? bars.slice(Math.max(0, index - 6), index) : [];
+      const boxHigh = box.length ? Math.max(...box.map((item) => Number(item.high))) : 0;
+      const boxLow = box.length ? Math.min(...box.map((item) => Number(item.low))) : 0;
+      const smallPlatform = box.length >= 4 && boxLow > 0 && (boxHigh - boxLow) / boxLow <= 0.08 && Math.abs(boxLow - levelPrice) / levelPrice <= 0.03;
+      const nearRepair = low <= levelPrice * 1.03 && held;
+      if (fastDrop && nearRepair && (consecutiveBull >= 2 || (bullish && near) || smallPlatform)) {
+        const how = consecutiveBull >= 2 ? "急跌后连续阳线快速拉回" : smallPlatform ? "急跌后小平台确认" : "急跌后支撑踩稳阳线";
+        commit("validated", "fast_drop_repair", bar, `${date} 急跌修复路径直接升级：${how}，收盘站上支撑 ${levelPrice.toFixed(2)}，无需额外回踩，确认为真实支撑。`);
+        continue;
+      }
+    }
+
+    if (status !== "validated" && index >= 6) {
+      const box = bars.slice(index - 6, index);
+      const boxHigh = Math.max(...box.map((item) => Number(item.high)));
+      const boxLow = Math.min(...box.map((item) => Number(item.low)));
+      const tight = boxLow > 0 && (boxHigh - boxLow) / boxLow <= 0.08;
+      const matchesLevel = Math.abs(boxHigh - levelPrice) / levelPrice <= 0.03 || Math.abs(boxLow - levelPrice) / levelPrice <= 0.03;
+      if (tight && matchesLevel && close > boxHigh && bullish) {
+        platformHigh = boxHigh;
+        platformBreakIndex = index;
+        commit("testing", "platform_break_retest", bar, `${date} 平台突破路径：收盘突破平台上沿 ${boxHigh.toFixed(2)}，原上沿转为待验证支撑，等待回踩阳线。`);
+      }
+    }
+    if (status !== "validated" && platformBreakIndex >= 0 && index > platformBreakIndex && platformHigh) {
+      const retest = low <= Math.max(platformHigh, levelPrice) * 1.02 && held && confirming;
+      if (retest) {
+        const volumeNote = "";
+        commit("validated", "platform_break_retest", bar, `${date} 平台突破回踩：回踩不破，出现${confirmText}确认${volumeNote}，升为真实支撑。`);
+        continue;
+      }
+    }
+
+    if (status !== "validated" && brokeIndex >= 0 && reclaimIndex >= 0 && index > reclaimIndex && near && held && confirming) {
+      commit("validated", "reclaim_retest_bullish", bar, `${date} 跌破后回踩确认：${confirmText}回踩支撑 ${levelPrice.toFixed(2)} 不破，收盘回到支撑上方，升为真实支撑。`);
+      continue;
+    }
+
+    if (status !== "validated" && index >= 8) {
+      const confirmedLows = [];
+      for (let pivot = 2; pivot <= index - 2; pivot += 1) {
+        const sample = bars.slice(pivot - 2, pivot + 3);
+        const pivotLow = Number(bars[pivot].low);
+        if (pivotLow <= Math.min(...sample.map((item) => Number(item.low)))) confirmedLows.push({ index: pivot, price: pivotLow });
+      }
+      const nearLows = confirmedLows.filter((point) => Math.abs(point.price - levelPrice) / levelPrice <= 0.04);
+      if (nearLows.length >= 2) {
+        const left = nearLows[nearLows.length - 2];
+        const right = nearLows[nearLows.length - 1];
+        const similar = Math.abs(left.price - right.price) / Math.max(left.price, right.price) <= 0.06;
+        if (similar && right.index > left.index) {
+          const middle = bars.slice(left.index, right.index + 1);
+          const neck = Math.max(...middle.map((item) => Number(item.high)));
+          neckline = neck;
+          secondBottomIndex = right.index;
+          if (neckBreakIndex < 0 && index > right.index && close > neck) {
+            neckBreakIndex = index;
+            commit("testing", "bottom_pattern", bar, `${date} 底部形态路径：两次低点不再创新低，收盘突破颈线 ${neck.toFixed(2)}，等待回踩阳线。`);
+          }
+        }
+      }
+    }
+    if (status !== "validated" && neckBreakIndex >= 0 && index > neckBreakIndex && neckline && low <= neckline * 1.02 && close >= neckline * 0.995 && confirming && held) {
+      commit("validated", "bottom_pattern", bar, `${date} 底部形态回踩：回踩颈线 ${neckline.toFixed(2)} 不破，出现${confirmText}确认，支撑位按颈线或平台下沿 ${levelPrice.toFixed(2)} 升为真实支撑。`);
+      continue;
+    }
+
+    if (status === "candidate" && (near || (held && low <= levelPrice * 1.03))) {
+      commit("testing", pathId, bar, `${date} 价格触及支撑 ${levelPrice.toFixed(2)}，进入验证中，等待急跌连续阳线、阳线回踩或平台突破回踩确认。`);
+    }
+  }
+
+  if (status === "validated" && !String(reason).trim()) {
+    reason = `${asOfDate} 支撑 ${levelPrice.toFixed(2)} 已升为真实支撑。`;
+  }
+  if (!String(reason).trim()) reason = fallbackReason;
+  return {
+    status,
+    label: statusLabels[status] || status,
+    pathId,
+    pathLabel: pathLabels[pathId] || "",
+    price: Number(levelPrice.toFixed(4)),
+    validationReason: reason,
+    supportValidationReason: reason,
+    validationHistory,
+    participatesInScoring: false,
+    asOfDate,
+    source: meta.source || "",
+  };
+}
+
+function buildBypassBuyGate(advice, validation, history, structure) {
+  const weeklyDirection = structure?.weeklyTrendDirection || "";
+  const label = validation?.label || "待验证";
+  const reason = String(validation?.validationReason || validation?.supportValidationReason || "").trim();
+  const weeklyNote = weeklyDirection === "下跌"
+    ? "周线下跌时只按反弹试错，不按趋势仓。"
+    : (weeklyDirection === "上涨" || weeklyDirection === "盘整")
+      ? "周线盘整或上涨时，真实支撑加上盈亏比即可作为旁路依据。"
+      : "";
+  const result = {
+    bypassBuyEligible: false,
+    bypassBuyReason: "",
+    bypassRiskReward: null,
+    bypassStopLossPct: null,
+    bypassParticipatesInScoring: false,
+  };
+  if (!validation || validation.status !== "validated") {
+    result.bypassBuyReason = `支撑验证状态：${label}。${reason || "尚未升为真实支撑。"} 旁路买入资格未开启，原买入评分不变。${weeklyNote}`.trim();
+    return result;
+  }
+  if (!reason) {
+    result.bypassBuyReason = "支撑已验证但缺少验证原因，旁路买入资格未开启，原买入评分不变。";
+    return result;
+  }
+  const bars = Array.isArray(history) ? history : [];
+  const close = Number(bars.at(-1)?.close || 0);
+  const stop = Number(advice?.stopLoss || 0);
+  const resistance = Number(advice?.pressurePlan?.price || advice?.pressurePlan?.level?.price || 0);
+  let stopPct = null;
+  if (advice && advice.stopRiskPct != null && advice.stopRiskPct !== "" && Number.isFinite(Number(advice.stopRiskPct))) {
+    stopPct = Number(advice.stopRiskPct) / 100;
+  } else if (close > stop && stop > 0) {
+    stopPct = (close - stop) / close;
+  }
+  let riskReward = null;
+  if (close > stop && stop > 0 && resistance > close) {
+    riskReward = (resistance - close) / (close - stop);
+  }
+  result.bypassRiskReward = riskReward == null ? null : Number(riskReward.toFixed(2));
+  result.bypassStopLossPct = stopPct == null ? null : Number((stopPct * 100).toFixed(2));
+  const stopOk = stopPct != null && stopPct >= 0.03 - 1e-8 && stopPct <= 0.08 + 1e-8;
+  const rewardOk = riskReward != null && riskReward >= 3;
+  result.bypassBuyEligible = Boolean(stopOk && rewardOk);
+  const rewardText = riskReward == null ? "缺少上方压力，未计算盈亏比" : `盈亏比 ${riskReward.toFixed(2)}`;
+  const stopText = stopPct == null ? "缺少止损" : `止损空间 ${(stopPct * 100).toFixed(2)}%`;
+  result.bypassBuyReason = result.bypassBuyEligible
+    ? `支撑验证状态：真实支撑。验证原因：${reason} 旁路买入只看${rewardText}（需至少3）和${stopText}（约3%到8%），当前满足。不替换原买入模型评分。${weeklyNote}`.trim()
+    : `支撑验证状态：真实支撑。验证原因：${reason} 旁路买入未通过：${rewardText}，${stopText}。需要盈亏比至少3且止损约3%到8%。原买入评分不变。${weeklyNote}`.trim();
+  return result;
+}
+
+function sellTrendBiasNote(structure = {}) {
+  const direction = structure.weeklyTrendDirection || "";
+  const span = structure.zones?.spanPct;
+  if (direction === "下跌") {
+    return "卖出偏好（只展示，不改卖出逻辑）：此前为下跌趋势，打到压力时卖出评分提高；反弹遇压优先兑现，不必等趋势破坏。";
+  }
+  if (direction === "上涨") {
+    return "卖出偏好（只展示，不改卖出逻辑）：此前为上涨趋势，不宜仅因接近压力就高分卖出。更好卖点是上涨加速后动能衰竭，或跌破上涨趋势后再卖。";
+  }
+  if (direction === "盘整") {
+    const spanText = span == null ? "跨度约20%（限定在2%到6%）" : `跨度 ${Number(span).toFixed(1)}% 的20%（限定在2%到6%）`;
+    return `卖出偏好（只展示，不改卖出逻辑）：打到区间上沿时卖出评分提高。向上快速突破后，若收盘重新落到上沿下方达到${spanText}，视为假突破并提高卖出评分；站稳区间外且回踩不破上沿，则转入上涨，不因离开上沿单独高分卖出。`;
+  }
+  return "卖出偏好（只展示，不改卖出逻辑）：周线结构尚不足，不调节卖出评分。";
+}
+
+function manualSupportPrice() {
+  if (typeof nearestManualLevels !== "function") return null;
+  try {
+    const price = Number(nearestManualLevels()?.support?.price);
+    return price > 0 ? price : null;
+  } catch (error) {
+    return null;
+  }
+}
+
 function recognizeMarketStructure(history = []) {
   const STATUS_LABELS = {
     candidate: "候选",
@@ -172,20 +744,38 @@ function recognizeMarketStructure(history = []) {
     zoneLow: null,
     zoneHigh: null,
     basis: "可用K线不足，未做结构判断。",
+    validationReason: "可用K线不足，未做支撑验证。",
+    supportValidationReason: "可用K线不足，未做支撑验证。",
     confirmedTouches: 0,
     source: "",
     asOfDate,
     participatesInScoring: false,
   });
+  const weeklyTrend = evaluateWeeklyTrendStructure(bars);
   if (bars.length < 20) {
+    const emptySupport = blankValidation("support");
     return {
       trendDirection: "",
       trendStage: "K线不足",
       trendConfidence: 0,
       supportCandidates: [],
       resistanceCandidates: [],
-      supportValidation: blankValidation("support"),
+      supportValidation: emptySupport,
       resistanceValidation: blankValidation("resistance"),
+      bypassSupportValidation: {
+        status: "candidate",
+        label: "待验证",
+        pathId: "",
+        pathLabel: "",
+        price: null,
+        validationReason: emptySupport.validationReason,
+        supportValidationReason: emptySupport.supportValidationReason,
+        validationHistory: [],
+        participatesInScoring: false,
+        asOfDate,
+      },
+      ...weeklyTrend,
+      sellTrendBiasNote: sellTrendBiasNote(weeklyTrend),
       asOfDate,
       lookbackBars: bars.length,
       participatesInScoring: false,
@@ -292,6 +882,7 @@ function recognizeMarketStructure(history = []) {
     let lastTouchDate = "";
     let reactions = [];
     let volumeNotes = [];
+    let validationReason = `${bars[start]?.date || "起始"} 摆动低点 ${roundPrice(price)} 形成支撑候选，状态为候选。`;
     for (let index = start; index < bars.length; index += 1) {
       const bar = bars[index];
       const close = Number(bar.close);
@@ -304,11 +895,13 @@ function recognizeMarketStructure(history = []) {
         status = "broken";
         touches = 0;
         active = false;
+        validationReason = `${bar.date || ""} 收盘跌破支撑 ${roundPrice(price)}，状态改为已失效。`;
         continue;
       }
       if (status === "broken" && close >= price) {
         status = "reclaimed";
         active = false;
+        validationReason = `${bar.date || ""} 跌破后收盘收回支撑 ${roundPrice(price)}，尚未完成回踩确认。`;
         continue;
       }
       if (status === "broken" || !tagged || !held) {
@@ -327,14 +920,26 @@ function recognizeMarketStructure(history = []) {
       const confirming = close >= open && close >= price * 0.995;
       if (status === "reclaimed") {
         status = touches >= 2 && confirming ? "validated" : "testing";
+        validationReason = status === "validated"
+          ? `${bar.date || ""} 跌破收回后再次守住，确认K线收在支撑上方，升为已验证支撑。`
+          : `${bar.date || ""} 跌破收回后的回踩仍在验证中。`;
       } else if (touches >= 2 && confirming) {
         status = "validated";
+        validationReason = `${bar.date || ""} 至少两次独立回踩守住，当日阳线收在支撑 ${roundPrice(price)} 上方，升为已验证支撑。`;
       } else if (status !== "validated") {
         status = "testing";
+        validationReason = `${bar.date || ""} 价格触碰支撑 ${roundPrice(price)}，进入验证中，单次反弹不升为已验证。`;
       }
     }
     const close = Number(bars.at(-1).close);
+    const statusBeforeExpire = status;
     status = maybeExpire(status, lastTouchIndex, price, close);
+    if (status === "expired" && statusBeforeExpire !== "expired") {
+      validationReason = `${asOfDate} 支撑距离当前价格较远且长时间未再验证，状态改为已过期。`;
+    }
+    if (status === "validated" && !String(validationReason).trim()) {
+      validationReason = `${lastTouchDate || asOfDate} 支撑 ${roundPrice(price)} 已验证。`;
+    }
     const basisByStatus = {
       candidate: "摆动低点形成的支撑候选，单次下探不会升级为已验证。",
       testing: "价格已触碰该支撑，仍需另一次守住，不能因一次反弹视为已验证。",
@@ -355,6 +960,8 @@ function recognizeMarketStructure(history = []) {
       reactionPct: reactions.length ? reactions.reduce((sum, item) => sum + item, 0) / reactions.length : null,
       volumeNote: volumeNotes.at(-1) || "",
       basis: basisByStatus[status] || "",
+      validationReason,
+      supportValidationReason: validationReason,
       firstDate: bars[start]?.date || firstPoint?.date || "",
       lastTouchDate,
       lastTouchIndex,
@@ -413,6 +1020,7 @@ function recognizeMarketStructure(history = []) {
       broken: "收盘已突破该压力。突破本身不会把它变成已验证支撑。",
       expired: "该压力距离当前价格较远，或已经过旧。",
     };
+    const validationReason = `${lastTouchDate || bars[start]?.date || asOfDate} ${basisByStatus[status] || "压力状态更新。"}`;
     return {
       price: roundPrice(price),
       zoneLow: roundPrice(price * 0.985),
@@ -425,6 +1033,7 @@ function recognizeMarketStructure(history = []) {
       reactionPct: reactions.length ? reactions.reduce((sum, item) => sum + item, 0) / reactions.length : null,
       volumeNote: volumeNotes.at(-1) || "",
       basis: basisByStatus[status] || "",
+      validationReason,
       firstDate: bars[start]?.date || firstPoint?.date || "",
       lastTouchDate,
       lastTouchIndex,
@@ -439,6 +1048,7 @@ function recognizeMarketStructure(history = []) {
     let lastTouchDate = "";
     let reactions = [];
     let status = "pending_retest";
+    let validationReason = `${bars[breakoutIndex]?.date || asOfDate} 收盘突破压力 ${roundPrice(price)} 后只记为待回踩确认，突破当日不视为已验证支撑。`;
     for (let index = breakoutIndex + 1; index < bars.length; index += 1) {
       const bar = bars[index];
       const close = Number(bar.close);
@@ -448,11 +1058,13 @@ function recognizeMarketStructure(history = []) {
         status = "broken";
         holds = 0;
         active = false;
+        validationReason = `${bar.date || ""} 突破后的回踩没有守住 ${roundPrice(price)}，该支撑候选失效。`;
         continue;
       }
       if (status === "broken" && close >= price) {
         status = "reclaimed";
         active = false;
+        validationReason = `${bar.date || ""} 跌破后收回 ${roundPrice(price)}，仍需后续回踩确认，不能直接视为已验证支撑。`;
         continue;
       }
       const tagged = low <= price * 1.02 && low >= price * 0.97;
@@ -476,6 +1088,11 @@ function recognizeMarketStructure(history = []) {
       } else if (status !== "validated") {
         status = "testing";
       }
+      validationReason = status === "validated"
+        ? `${bar.date || ""} 平台突破回踩：第 ${holds} 次回踩守住，确认K线收阳，升为已验证支撑。`
+        : status === "testing"
+          ? `${bar.date || ""} 压力突破后的回踩仍在验证中，单次回踩不升为已验证支撑。`
+          : validationReason;
     }
     const basisByStatus = {
       pending_retest: "收盘突破压力后只记为待回踩确认，突破当日不视为已验证支撑。",
@@ -496,6 +1113,8 @@ function recognizeMarketStructure(history = []) {
       reactionPct: reactions.length ? reactions.reduce((sum, item) => sum + item, 0) / reactions.length : null,
       volumeNote: "",
       basis: basisByStatus[status] || "",
+      validationReason: validationReason || basisByStatus[status] || `${asOfDate} 支撑状态更新。`,
+      supportValidationReason: validationReason || basisByStatus[status] || `${asOfDate} 支撑状态更新。`,
       firstDate: bars[breakoutIndex]?.date || "",
       lastTouchDate,
       lastTouchIndex,
@@ -600,12 +1219,15 @@ function recognizeMarketStructure(history = []) {
         zoneLow: null,
         zoneHigh: null,
         basis: kind === "support" ? "当前可见K线里没有可用的支撑候选。" : "当前可见K线里没有仍有效的压力候选。",
+        validationReason: kind === "support" ? "当前可见K线里没有可用的支撑候选。" : "当前可见K线里没有仍有效的压力候选。",
+        supportValidationReason: kind === "support" ? "当前可见K线里没有可用的支撑候选。" : "当前可见K线里没有仍有效的压力候选。",
         confirmedTouches: 0,
         source: "",
         asOfDate,
         participatesInScoring: false,
       };
     }
+    const validationReason = selected.validationReason || selected.supportValidationReason || selected.basis || `${asOfDate} ${selected.statusLabel || selected.status || "状态更新"}。`;
     return {
       status: selected.status,
       label: selected.statusLabel,
@@ -613,6 +1235,8 @@ function recognizeMarketStructure(history = []) {
       zoneLow: selected.zoneLow,
       zoneHigh: selected.zoneHigh,
       basis: selected.basis,
+      validationReason,
+      supportValidationReason: selected.supportValidationReason || validationReason,
       confirmedTouches: selected.touches,
       source: selected.source,
       asOfDate,
@@ -705,6 +1329,24 @@ function recognizeMarketStructure(history = []) {
     trendStage = close > ma20 ? "趋势修复" : "震荡筑底";
   }
 
+  const bypassSupportValidation = supportValidation.price
+    ? evaluateSupportPathValidation(bars, supportValidation.price, { source: supportValidation.source || "structure" })
+    : {
+      status: "candidate",
+      label: "待验证",
+      pathId: "",
+      pathLabel: "",
+      price: null,
+      validationReason: supportValidation.validationReason || "当前没有可验证的支撑。",
+      supportValidationReason: supportValidation.supportValidationReason || supportValidation.validationReason || "当前没有可验证的支撑。",
+      validationHistory: [],
+      participatesInScoring: false,
+      asOfDate,
+    };
+  if (bypassSupportValidation.status === "validated" && !String(bypassSupportValidation.validationReason || "").trim()) {
+    bypassSupportValidation.validationReason = `${asOfDate} 支撑已升为真实支撑。`;
+    bypassSupportValidation.supportValidationReason = bypassSupportValidation.validationReason;
+  }
   return {
     trendDirection,
     trendStage,
@@ -713,6 +1355,9 @@ function recognizeMarketStructure(history = []) {
     resistanceCandidates,
     supportValidation,
     resistanceValidation,
+    bypassSupportValidation,
+    ...weeklyTrend,
+    sellTrendBiasNote: sellTrendBiasNote(weeklyTrend),
     asOfDate,
     lookbackBars: bars.length,
     participatesInScoring: false,
@@ -722,6 +1367,11 @@ function recognizeMarketStructure(history = []) {
 
 function attachStructureRecognition(advice, history) {
   const structure = recognizeMarketStructure(history);
+  const manualPrice = manualSupportPrice();
+  const bypassSupportValidation = manualPrice
+    ? evaluateSupportPathValidation(history, manualPrice, { source: "manual" })
+    : structure.bypassSupportValidation;
+  const gate = buildBypassBuyGate(advice, bypassSupportValidation, history, structure);
   if (!advice || typeof advice !== "object") return advice;
   return {
     ...advice,
@@ -732,6 +1382,19 @@ function attachStructureRecognition(advice, history) {
     resistanceCandidates: structure.resistanceCandidates,
     supportValidation: structure.supportValidation,
     resistanceValidation: structure.resistanceValidation,
+    bypassSupportValidation,
+    weeklyTrendDirection: structure.weeklyTrendDirection,
+    weeklyTrendStage: structure.weeklyTrendStage,
+    weeklyTrendStrength: structure.weeklyTrendStrength,
+    weeklyTrendBasis: structure.weeklyTrendBasis,
+    zones: structure.zones,
+    turnCount: structure.turnCount,
+    sellTrendBiasNote: structure.sellTrendBiasNote,
+    bypassBuyEligible: gate.bypassBuyEligible,
+    bypassBuyReason: gate.bypassBuyReason,
+    bypassRiskReward: gate.bypassRiskReward,
+    bypassStopLossPct: gate.bypassStopLossPct,
+    bypassParticipatesInScoring: false,
   };
 }
 
