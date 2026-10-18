@@ -253,6 +253,142 @@ const adviceSource = generated.slice(adviceStart, adviceEnd);
 assert.ok(!adviceSource.includes("recognizeMarketStructure"));
 assert.ok(!adviceSource.includes("trendConfidence"));
 
+function extractAppFunction(source, name) {
+  const marker = `function ${name}(`;
+  const start = source.indexOf(marker);
+  assert.ok(start >= 0, name);
+  const signatureEnd = source.indexOf(") {", start);
+  const brace = signatureEnd + 2;
+  let depth = 0;
+  let quote = "";
+  let escaped = false;
+  for (let index = brace; index < source.length; index += 1) {
+    const char = source[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = "";
+      continue;
+    }
+    if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, index + 1);
+    }
+  }
+  throw new Error(`Unclosed function: ${name}`);
+}
+
+const appSource = require("fs").readFileSync("./app.js", "utf8");
+const gateContext = {};
+require("vm").runInNewContext(
+  `${extractAppFunction(appSource, "humanSupportPath")}\n${extractAppFunction(appSource, "applyHumanSupportBuyGate")}\nthis.humanSupportPath = humanSupportPath;\nthis.applyHumanSupportBuyGate = applyHumanSupportBuyGate;`,
+  gateContext,
+);
+const baseBuy = {
+  side: "buy",
+  action: "buy",
+  actionText: "建议买入",
+  score: 86,
+  model: "上升趋势延续",
+  matched: ["结构确认"],
+  participatesInScoring: false,
+  stage: "回踩确认",
+  bypassBuyEligible: false,
+  bypassBuyReason: "原旁路未开启",
+  bypassRiskReward: 4,
+  bypassStopLossPct: 5,
+  bypassSupportValidation: { status: "candidate", label: "待验证", validationReason: "系统原因", participatesInScoring: false },
+};
+const gatedWatch = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "待验证", evidence: "" });
+assert.strictEqual(gatedWatch.action, "watch");
+assert.strictEqual(gatedWatch.actionText, "建议观望");
+assert.strictEqual(gatedWatch.score, 86);
+assert.strictEqual(gatedWatch.model, "上升趋势延续");
+assert.strictEqual(gatedWatch.matched, baseBuy.matched);
+assert.strictEqual(gatedWatch.participatesInScoring, false);
+assert.strictEqual(baseBuy.action, "buy");
+const gatedCandidate = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "候选", evidence: "多次回踩反弹" });
+assert.strictEqual(gatedCandidate.action, "watch");
+assert.strictEqual(gatedCandidate.score, 86);
+const gatedReclaimed = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "跌破后收回", evidence: "" });
+assert.strictEqual(gatedReclaimed.action, "watch");
+const gatedBroken = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "失效", evidence: "" });
+assert.strictEqual(gatedBroken.action, "watch");
+assert.strictEqual(gatedBroken.bypassSupportValidation.label, "失效");
+const gatedExpired = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "已过期", evidence: "" });
+assert.strictEqual(gatedExpired.action, "watch");
+const gatedEmptyEvidence = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "真实支撑", evidence: "" });
+assert.strictEqual(gatedEmptyEvidence.action, "watch");
+assert.strictEqual(gatedEmptyEvidence.bypassBuyEligible, false);
+assert.strictEqual(gatedEmptyEvidence.score, 86);
+const gatedHumanBuy = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "已验证", evidence: "急跌修复" });
+assert.strictEqual(gatedHumanBuy.action, "buy");
+assert.strictEqual(gatedHumanBuy.actionText, "建议买入");
+assert.strictEqual(gatedHumanBuy.score, 86);
+assert.strictEqual(gatedHumanBuy.model, baseBuy.model);
+assert.strictEqual(gatedHumanBuy.matched, baseBuy.matched);
+assert.strictEqual(gatedHumanBuy.bypassSupportValidation.pathId, "fast_drop_repair");
+assert.strictEqual(gatedHumanBuy.bypassSupportValidation.validationReason, "急跌修复");
+assert.strictEqual(gatedHumanBuy.bypassSupportValidation.participatesInScoring, false);
+assert.ok(gatedHumanBuy.bypassBuyReason.includes("急跌修复"));
+const gatedTightStop = gateContext.applyHumanSupportBuyGate({ ...baseBuy, bypassStopLossPct: 2.5 }, { status: "真实支撑", evidence: "平台突破回踩" });
+assert.strictEqual(gatedTightStop.action, "watch");
+assert.strictEqual(gatedTightStop.score, 86);
+const gatedStopFloor = gateContext.applyHumanSupportBuyGate({ ...baseBuy, bypassStopLossPct: 3, bypassRiskReward: 3 }, { status: "真实支撑", evidence: "平台突破回踩" });
+assert.strictEqual(gatedStopFloor.action, "buy");
+const gatedWideStop = gateContext.applyHumanSupportBuyGate({ ...baseBuy, bypassStopLossPct: 9, bypassRiskReward: 3 }, { status: "真实支撑", evidence: "底部形态" });
+assert.strictEqual(gatedWideStop.action, "watch");
+const gatedLowReward = gateContext.applyHumanSupportBuyGate({ ...baseBuy, bypassRiskReward: 2.9 }, { status: "真实支撑", evidence: "头肩底" });
+assert.strictEqual(gatedLowReward.action, "watch");
+const gatedEdges = gateContext.applyHumanSupportBuyGate({ ...baseBuy, bypassStopLossPct: 8, bypassRiskReward: 3 }, { status: "真实支撑", evidence: "突破回踩" });
+assert.strictEqual(gatedEdges.action, "buy");
+assert.strictEqual(gatedEdges.bypassSupportValidation.pathId, "platform_break_retest");
+assert.strictEqual(gatedEdges.bypassSupportValidation.pathLabel, "平台突破回踩");
+gateContext.currentReplayCandle = () => ({ close: 10 });
+const derivedGeometry = gateContext.applyHumanSupportBuyGate({
+  ...baseBuy,
+  bypassStopLossPct: null,
+  bypassRiskReward: null,
+  stopRiskPct: 5,
+  stopLoss: 9.5,
+  pressurePlan: { price: 13 },
+}, { status: "真实支撑", evidence: "急跌修复" });
+assert.strictEqual(derivedGeometry.action, "buy");
+assert.strictEqual(derivedGeometry.score, 86);
+assert.ok(derivedGeometry.bypassRiskReward >= 3);
+const followBuy = gateContext.applyHumanSupportBuyGate({
+  ...baseBuy,
+  action: "watch",
+  actionText: "建议观望",
+  score: 38,
+  bypassBuyEligible: true,
+  bypassBuyReason: "支撑验证状态：真实支撑。验证原因：系统阳线回踩。",
+  bypassSupportValidation: { status: "validated", label: "真实支撑", validationReason: "系统阳线回踩", pathId: "reclaim_retest_bullish", pathLabel: "跌破后回踩确认" },
+}, { status: "", evidence: "" });
+assert.strictEqual(followBuy.action, "buy");
+assert.strictEqual(followBuy.score, 38);
+assert.strictEqual(followBuy.bypassSupportValidation.validationReason, "系统阳线回踩");
+const followBlocked = gateContext.applyHumanSupportBuyGate(baseBuy, { status: "", evidence: "" });
+assert.strictEqual(followBlocked.action, "watch");
+assert.strictEqual(followBlocked.score, 86);
+assert.strictEqual(followBlocked.bypassSupportValidation.validationReason, "系统原因");
+const sellKept = gateContext.applyHumanSupportBuyGate({
+  ...baseBuy,
+  side: "sell",
+  action: "sell",
+  actionText: "建议卖出",
+}, { status: "真实支撑", evidence: "急跌修复" });
+assert.strictEqual(sellKept.action, "sell");
+assert.strictEqual(sellKept.actionText, "建议卖出");
+assert.strictEqual(sellKept.score, 86);
+assert.ok(!appSource.slice(appSource.indexOf("function ruleLibraryAdvice("), appSource.indexOf("function manualSupportPrice(")).includes("applyHumanSupportBuyGate"));
+assert.ok(!generated.includes("applyHumanSupportBuyGate"));
+
 console.log("structure recognition checks passed");
 console.log(JSON.stringify({
   up: { direction: upStructure.trendDirection, stage: upStructure.trendStage, confidence: upStructure.trendConfidence, support: upStructure.supportValidation },

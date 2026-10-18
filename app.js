@@ -3188,6 +3188,8 @@ function serializeLevel(level) {
     pathLabel: level.pathLabel || "",
     bypassStatus: level.bypassStatus || "",
     reason: level.reason || "",
+    humanSupportStatus: level.humanSupportStatus || "",
+    humanEvidence: level.humanEvidence || "",
     auto: Boolean(level.auto),
     score: level.score ?? null,
   };
@@ -3209,6 +3211,8 @@ function normalizeStoredLevel(level) {
     price,
     role,
     reason: String(level.reason || ""),
+    humanSupportStatus: level.humanSupportStatus || "",
+    humanEvidence: level.humanEvidence || "",
     validationStatus: level.validationStatus || "",
     validationReason: String(level.validationReason || level.supportValidationReason || ""),
     supportValidationReason: String(level.supportValidationReason || level.validationReason || ""),
@@ -3259,6 +3263,34 @@ function saveReplayLevels() {
   }
 }
 
+function humanSupportPath(evidence) {
+  const table = {
+    "急跌修复": ["fast_drop_repair", "急跌修复"],
+    "跌破后回踩确认": ["reclaim_retest_bullish", "跌破后回踩确认"],
+    "多次回踩反弹": ["reclaim_retest_bullish", "多次回踩反弹"],
+    "假跌破后收回": ["reclaim_retest_bullish", "假跌破后收回"],
+    "底部形态": ["bottom_pattern", "底部形态"],
+    "头肩底": ["bottom_pattern", "底部形态"],
+    "平台突破回踩": ["platform_break_retest", "平台突破回踩"],
+    "突破回踩": ["platform_break_retest", "平台突破回踩"],
+    "人工结构判断": ["", "人工结构判断"],
+  };
+  const hit = table[String(evidence || "").trim()];
+  if (hit) return { pathId: hit[0], pathLabel: hit[1] };
+  const text = String(evidence || "").trim();
+  return text ? { pathId: "", pathLabel: text } : { pathId: "", pathLabel: "" };
+}
+
+function bottomHumanSupportFields() {
+  if (typeof document === "undefined") {
+    return { status: "", evidence: "", pathId: "", pathLabel: "" };
+  }
+  const status = document.querySelector("#replaySupportStatus")?.value || "";
+  const evidence = document.querySelector("#replaySupportEvidence")?.value || "";
+  const path = humanSupportPath(evidence);
+  return { status, evidence, pathId: path.pathId, pathLabel: path.pathLabel };
+}
+
 function recordLevelCorrection(action, level, detail = {}) {
   const candle = currentReplayCandle();
   if (!candle || !level) return;
@@ -3274,9 +3306,45 @@ function recordLevelCorrection(action, level, detail = {}) {
     fromPrice: detail.fromPrice ?? null,
     toPrice: detail.toPrice ?? level.price ?? null,
     reason: detail.reason ?? level.reason ?? "",
+    validationStatus: detail.validationStatus ?? "",
+    pathId: detail.pathId ?? "",
+    pathLabel: detail.pathLabel ?? "",
+    humanSupportStatus: detail.humanSupportStatus ?? "",
+    humanEvidence: detail.humanEvidence ?? "",
     sourceAuto: Boolean(level.auto),
     recordedAt: new Date().toISOString(),
   });
+}
+
+function recordBottomSelectLevelCorrection() {
+  const candle = currentReplayCandle();
+  if (!candle) return;
+  const level = selectedManualLevel() || nearestManualLevels().support;
+  if (!level) return;
+  const human = bottomHumanSupportFields();
+  const last = (replayState.levelCorrections || []).at(-1);
+  if (
+    last
+    && last.action === "bottom_select"
+    && last.levelId === level.id
+    && last.date === candle.date
+    && last.humanSupportStatus === human.status
+    && last.humanEvidence === human.evidence
+  ) return;
+  level.humanSupportStatus = human.status;
+  level.humanEvidence = human.evidence;
+  recordLevelCorrection("bottom_select", level, {
+    toPrice: level.price,
+    reason: human.evidence || human.status || "跟随系统",
+    side: levelTrainingSide(level),
+    validationStatus: human.status,
+    pathId: human.pathId,
+    pathLabel: human.pathLabel,
+    humanSupportStatus: human.status,
+    humanEvidence: human.evidence,
+  });
+  saveReplayLevels();
+  updateLevelTrainingUi();
 }
 
 function updateLevelTrainingUi() {
@@ -3290,25 +3358,37 @@ function buildLevelTrainingPayload() {
   const nearest = nearestManualLevels();
   const history = replayDailyHistory();
   const structure = history.length ? recognizeMarketStructure(history) : null;
+  const human = bottomHumanSupportFields();
+  const support = nearest.support;
   return {
     ...levelTrainingContext(),
     autoSnapshot: replayState.autoLevelSnapshot,
     corrections: replayState.levelCorrections || [],
     acceptedLevels: {
-      support: serializeLevel(nearest.support),
+      support: serializeLevel(support),
       resistance: serializeLevel(nearest.resistance),
     },
     allLevels: (replayState.manualLevels || []).map(serializeLevel),
+    validationStatus: human.status,
+    pathId: human.pathId,
+    pathLabel: human.pathLabel,
+    humanSupportStatus: human.status,
+    humanEvidence: human.evidence,
+    humanValidationReason: human.evidence,
     weeklyTrend: structure ? {
       weeklyTrendDirection: structure.weeklyTrendDirection || "",
       weeklyTrendStage: structure.weeklyTrendStage || "",
       weeklyTrendStrength: structure.weeklyTrendStrength || "",
       turnCount: structure.turnCount ?? null,
     } : null,
-    supportPath: nearest.support ? {
-      validationStatus: nearest.support.bypassStatus || nearest.support.validationStatus || "",
-      pathId: nearest.support.pathId || "",
-      validationReason: nearest.support.validationReason || nearest.support.supportValidationReason || "",
+    supportPath: (support || human.status || human.evidence) ? {
+      validationStatus: human.status || support?.humanSupportStatus || support?.bypassStatus || support?.validationStatus || "",
+      pathId: human.pathId || support?.pathId || "",
+      pathLabel: human.pathLabel || support?.pathLabel || "",
+      validationReason: human.evidence || support?.humanEvidence || support?.validationReason || support?.supportValidationReason || "",
+      humanSupportStatus: human.status,
+      humanEvidence: human.evidence,
+      humanValidationReason: human.evidence,
     } : null,
   };
 }
@@ -3322,10 +3402,12 @@ async function saveLevelTrainingSample() {
     setStatus("#replayStatus", "请先点击周线自动画线，生成自动线快照。", "negative");
     return;
   }
-  if (!(replayState.levelCorrections || []).length) {
-    setStatus("#replayStatus", "当前没有人工修正动作，暂不保存画线训练样本。", "negative");
+  const acceptedAutoLevel = (replayState.manualLevels || []).some((level) => level.auto && Number(level.price) > 0);
+  if (!(replayState.levelCorrections || []).length && !acceptedAutoLevel) {
+    setStatus("#replayStatus", "当前没有人工修正动作，也没有已接受的自动线，暂不保存画线训练样本。", "negative");
     return;
   }
+  const acceptingAutoLevels = !(replayState.levelCorrections || []).length;
   const payload = buildLevelTrainingPayload();
   const response = await fetch(apiUrl("/api/level-training-sample"), {
     method: "POST",
@@ -3339,7 +3421,7 @@ async function saveLevelTrainingSample() {
   }
   replayState.levelCorrections = [];
   updateLevelTrainingUi();
-  setStatus("#replayStatus", "已保存画线训练样本，可用于拟合周线自动画线准确度。", "positive");
+  setStatus("#replayStatus", acceptingAutoLevels ? "已保存画线训练样本（接受当前自动线）。" : "已保存画线训练样本，可用于拟合周线自动画线准确度。", "positive");
 }
 
 function syncManualLevelInputs() {
@@ -6468,6 +6550,8 @@ function structureCompareNotes(advice, human = humanStructureSelections()) {
     "真实支撑": "真实支撑",
     "已失效": "失效",
     "失效": "失效",
+    "跌破后收回": "跌破后收回",
+    "已过期": "已过期",
   };
   const humanSupportKey = supportAlign[human.humanSupport] || "";
   if (humanSupportKey && supportView.statusText && humanSupportKey !== supportView.statusText) gaps.push("支撑验证状态与人工不一致");
@@ -6660,6 +6744,144 @@ function activeReplayAdvice() {
   return withLiveStructure(replayState.serverAdvice || frontendReplayAdvice() || replayServerAdvicePlaceholder());
 }
 
+function applyHumanSupportBuyGate(advice, humanOverride) {
+  if (!advice || typeof advice !== "object") return advice;
+  const lockedScore = advice.score;
+  const lockedModel = advice.model;
+  const lockedMatched = advice.matched;
+  const lockedParticipates = advice.participatesInScoring;
+  const protectAction = advice.side === "sell" || advice.action === "sell" || advice.action === "hold_position";
+  const copy = { ...advice };
+  const human = humanOverride || bottomHumanSupportFields();
+  const status = String(human.status || human.humanSupportStatus || "").trim();
+  const evidence = String(human.evidence || human.humanEvidence || human.evidenceText || "").trim();
+  const path = human.pathId || human.pathLabel
+    ? { pathId: human.pathId || "", pathLabel: human.pathLabel || "" }
+    : humanSupportPath(evidence);
+  const finiteOrNull = (value) => {
+    if (value == null || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  };
+  let stopPct = finiteOrNull(copy.bypassStopLossPct);
+  if (stopPct == null) stopPct = finiteOrNull(copy.stopRiskPct);
+  let riskReward = finiteOrNull(copy.bypassRiskReward);
+  if (stopPct == null || riskReward == null) {
+    const close = typeof currentReplayCandle === "function" ? Number(currentReplayCandle()?.close || 0) : 0;
+    const stop = Number(copy.stopLoss || 0);
+    const resistance = Number(copy.pressurePlan?.price || copy.pressurePlan?.level?.price || 0);
+    if (stopPct == null && close > stop && stop > 0) stopPct = ((close - stop) / close) * 100;
+    if (riskReward == null && close > stop && stop > 0 && resistance > close) riskReward = (resistance - close) / (close - stop);
+  }
+  if (stopPct != null) copy.bypassStopLossPct = Number(stopPct.toFixed(2));
+  if (riskReward != null) copy.bypassRiskReward = Number(riskReward.toFixed(2));
+  const geometryOk = stopPct != null && stopPct >= 3 - 1e-6 && stopPct <= 8 + 1e-6 && riskReward != null && riskReward >= 3 - 1e-8;
+  const geometryText = `盈亏比 ${riskReward == null ? "未计算" : riskReward.toFixed(2)}（需至少3），止损 ${stopPct == null ? "未计算" : `${stopPct.toFixed(2)}%`}（约3%到8%）`;
+  const validated = new Set(["真实支撑", "已验证", "validated"]);
+  const watchStatuses = new Set(["待验证", "候选", "验证中", "跌破后收回", "candidate", "testing", "reclaimed"]);
+  const invalidStatuses = new Set(["失效", "已失效", "已过期", "broken", "expired", "invalidated"]);
+  const labels = {
+    "候选": "待验证",
+    "candidate": "待验证",
+    "待验证": "待验证",
+    "验证中": "验证中",
+    "testing": "验证中",
+    "真实支撑": "真实支撑",
+    "已验证": "真实支撑",
+    "validated": "真实支撑",
+    "失效": "失效",
+    "已失效": "失效",
+    "broken": "失效",
+    "invalidated": "失效",
+    "跌破后收回": "跌破后收回",
+    "reclaimed": "跌破后收回",
+    "已过期": "已过期",
+    "expired": "已过期",
+  };
+  const codes = {
+    "待验证": "candidate",
+    "验证中": "testing",
+    "真实支撑": "validated",
+    "失效": "invalidated",
+    "跌破后收回": "reclaimed",
+    "已过期": "expired",
+  };
+
+  const lock = () => {
+    copy.score = lockedScore;
+    copy.model = lockedModel;
+    copy.matched = lockedMatched;
+    copy.participatesInScoring = lockedParticipates;
+    return copy;
+  };
+  const setWatch = (reason) => {
+    copy.bypassBuyEligible = false;
+    copy.bypassBuyReason = reason;
+    if (!protectAction) {
+      copy.action = "watch";
+      copy.actionText = "建议观望";
+    }
+    return lock();
+  };
+  const setBuy = (reason) => {
+    copy.bypassBuyEligible = true;
+    copy.bypassBuyReason = reason;
+    if (!protectAction) {
+      copy.action = "buy";
+      copy.actionText = "建议买入";
+    }
+    return lock();
+  };
+  const overlayValidation = (label, mappedStatus, reason) => {
+    const previous = copy.bypassSupportValidation && typeof copy.bypassSupportValidation === "object" ? copy.bypassSupportValidation : {};
+    copy.bypassSupportValidation = {
+      ...previous,
+      status: mappedStatus,
+      label,
+      pathId: path.pathId || "",
+      pathLabel: path.pathLabel || "",
+      validationReason: reason,
+      supportValidationReason: reason,
+      participatesInScoring: false,
+    };
+  };
+
+  if (!status) {
+    if (copy.bypassBuyEligible === true && geometryOk) {
+      return setBuy(copy.bypassBuyReason || `跟随系统旁路：支撑已验证。${geometryText}。不替换原买入模型评分。`);
+    }
+    if (copy.action === "buy") {
+      const prior = copy.bypassBuyReason ? `${copy.bypassBuyReason} ` : "";
+      return setWatch(`跟随系统旁路未通过：需要真实支撑、盈亏比至少3、止损约3%到8%。${prior}${geometryText}。原评分不变。`);
+    }
+    copy.bypassBuyEligible = false;
+    return lock();
+  }
+
+  const label = labels[status] || status;
+  const mappedStatus = codes[label] || "candidate";
+  if (validated.has(status)) {
+    overlayValidation(label, "validated", evidence);
+    if (!evidence) {
+      return setWatch("人工标注为真实支撑，但支撑验证依据为空，不允许买入。原评分不变。");
+    }
+    if (!geometryOk) {
+      return setWatch(`人工真实支撑。验证原因：${evidence}。买入未通过：${geometryText}。原评分不变。`);
+    }
+    return setBuy(`人工真实支撑。验证原因：${evidence}。${geometryText}，当前满足。不替换原买入模型评分。`);
+  }
+  if (watchStatuses.has(status)) {
+    overlayValidation(label, mappedStatus, evidence ? `人工标注为${label}。依据：${evidence}。尚未升为真实支撑。` : `人工标注为${label}，尚未升为真实支撑。`);
+    return setWatch(`人工支撑状态：${label}。即使原评分达到买入线，也先观望。原评分不变。`);
+  }
+  if (invalidStatuses.has(status)) {
+    overlayValidation(label, mappedStatus, evidence ? `人工标注为${label}。依据：${evidence}。` : `人工标注为${label}，支撑不再作为买入依据。`);
+    return setWatch(`人工支撑状态：${label}。买入建议改为观望。原评分不变。`);
+  }
+  overlayValidation(label, mappedStatus, evidence || `人工支撑状态：${label}。`);
+  return setWatch(`人工支撑状态：${label}。未确认为真实支撑，买入建议改为观望。原评分不变。`);
+}
+
 function renderRuleAdvice() {
   const titleNode = document.querySelector("#ruleAdviceTitle");
   const stageNode = document.querySelector("#ruleAdviceStage");
@@ -6691,6 +6913,7 @@ function renderRuleAdvice() {
   }
   if (!loggedAdvice) advice = withLiveStructure(advice);
   else if (currentReplayCandle()) advice = attachStructureRecognition({ ...advice }, replayDailyHistory());
+  advice = applyHumanSupportBuyGate(advice && typeof advice === "object" ? { ...advice } : advice);
   const hasCandle = Boolean(currentReplayCandle());
   if (copyButton) copyButton.disabled = !hasCandle;
   if (executeButton) executeButton.disabled = !hasCandle;
@@ -6953,7 +7176,10 @@ function inferAiAdviceFeedback(action, reason, note, advice = currentAiAdviceSna
 
 
 function currentAiAdviceSnapshot() {
-  const advice = activeReplayAdvice();
+  const logged = loggedAdviceSnapshotForCurrentCandle();
+  let advice = logged || activeReplayAdvice();
+  if (logged && currentReplayCandle()) advice = attachStructureRecognition({ ...advice }, replayDailyHistory());
+  advice = applyHumanSupportBuyGate(advice && typeof advice === "object" ? { ...advice } : advice);
   return {
     trendDirection: advice.trendDirection || advice.trend?.direction || "",
     trendStage: advice.trendStage || advice.stage || "",
@@ -9036,7 +9262,13 @@ document.querySelector("#backtestDeleteSelectedLevel")?.addEventListener("click"
   syncBacktestManualLevels();
   updateBacktestLevelUi();
 });
-["#replayTrendDirection", "#replayTrendStage", "#replaySupportStatus", "#replaySupportEvidence", "#replayStructure"].forEach((selector) => {
+["#replaySupportStatus", "#replaySupportEvidence"].forEach((selector) => {
+  document.querySelector(selector)?.addEventListener("change", () => {
+    recordBottomSelectLevelCorrection();
+    renderRuleAdvice();
+  });
+});
+["#replayTrendDirection", "#replayTrendStage", "#replayStructure"].forEach((selector) => {
   document.querySelector(selector)?.addEventListener("change", () => renderRuleAdvice());
 });
 document.querySelector("#copyRuleAdviceSummary")?.addEventListener("click", copyRuleAdviceSummary);
