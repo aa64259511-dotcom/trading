@@ -4329,7 +4329,7 @@ function zoomReplayChart(direction) {
 function replayDailyHistory() {
   const daily = replayState.data?.timeframes?.daily || [];
   if (!daily.length) return [];
-  return daily.slice(0, replayState.cursor + 1);
+  return daily.slice(0, replayState.cursor + 1).slice(-700);
 }
 
 function average(items, selector) {
@@ -6721,6 +6721,70 @@ async function fetchReplayServerAdvice(payload) {
   }
 }
 
+function replayUsesServerAdvice() {
+  if (replayState.preferServerReplayAdvice === true) return true;
+  try {
+    return window.localStorage?.getItem("trading-advice:use-server-replay-advice") === "1";
+  } catch (error) {
+    return false;
+  }
+}
+
+function replayLevelsFingerprint() {
+  return (replayState.manualLevels || []).map((level) => [
+    level?.id || "",
+    level?.price ?? "",
+    level?.role || "",
+    level?.validationStatus || "",
+    level?.auto ? 1 : 0,
+  ].join(":")).join("|");
+}
+
+function replayAdviceCacheKey() {
+  const candle = currentReplayCandle();
+  const history = replayDailyHistory();
+  const position = replayState.position;
+  const logged = loggedAdviceSnapshotForCurrentCandle();
+  const incomplete = !logged && !replayState.writeTraining && replayState.marketPosition?.status === "held" && !replayMarketPositionForAdvice();
+  const source = replayUsesServerAdvice()
+    ? `server:${replayState.serverAdviceStatus || ""}:${replayState.serverAdviceKey || ""}`
+    : "frontend";
+  return [
+    source,
+    replayState.data?.symbol || "",
+    replayState.data?.market || "",
+    candle?.date || "",
+    replayState.cursor,
+    history.length,
+    history[0]?.date || "",
+    history.at?.(-1)?.date || history[history.length - 1]?.date || "",
+    position ? `${position.entryDate || ""}|${position.entryPrice || ""}|${position.stopLoss || ""}` : "",
+    replayLevelsFingerprint(),
+    logged ? `logged:${logged.action || ""}:${logged.score ?? ""}:${logged.model || ""}` : "live",
+    incomplete ? "incomplete" : "complete",
+  ].join("~");
+}
+
+function readReplayAdviceCache(key) {
+  const map = replayState.frontendAdviceCacheMap;
+  if (!map || !map.has(key)) return null;
+  const advice = map.get(key);
+  map.delete(key);
+  map.set(key, advice);
+  return advice;
+}
+
+function rememberReplayAdviceCache(key, advice) {
+  if (!replayState.frontendAdviceCacheMap) replayState.frontendAdviceCacheMap = new Map();
+  const map = replayState.frontendAdviceCacheMap;
+  if (map.has(key)) map.delete(key);
+  map.set(key, advice);
+  while (map.size > 8) {
+    const oldest = map.keys().next().value;
+    map.delete(oldest);
+  }
+}
+
 function frontendReplayAdvice() {
   if (!currentReplayCandle()) return null;
   const history = replayDailyHistory();
@@ -6735,13 +6799,57 @@ function frontendReplayAdvice() {
 
 function withLiveStructure(advice, { frozen = false } = {}) {
   if (!advice || frozen || !currentReplayCandle()) return advice;
-  return attachStructureRecognition(advice, replayDailyHistory());
+  const key = replayAdviceCacheKey();
+  if (advice.replayStructureKey === key) return advice;
+  const structured = attachStructureRecognition(advice, replayDailyHistory());
+  if (structured && typeof structured === "object") structured.replayStructureKey = key;
+  return structured;
+}
+
+function replayStructuredAdvice() {
+  if (!currentReplayCandle()) return replayServerAdvicePlaceholder();
+  const key = replayAdviceCacheKey();
+  const cached = readReplayAdviceCache(key);
+  if (cached) return cached;
+  const logged = loggedAdviceSnapshotForCurrentCandle();
+  const incomplete = !logged && !replayState.writeTraining && replayState.marketPosition?.status === "held" && !replayMarketPositionForAdvice();
+  const history = replayDailyHistory();
+  let advice;
+  if (logged) {
+    advice = attachStructureRecognition({ ...logged }, history);
+  } else if (replayUsesServerAdvice() && replayState.serverAdvice) {
+    advice = attachStructureRecognition({ ...replayState.serverAdvice }, history);
+  } else {
+    advice = frontendReplayAdvice() || replayServerAdvicePlaceholder();
+  }
+  if (incomplete && advice) {
+    advice = {
+      ...advice,
+      side: "sell",
+      sideLabel: "卖出观察",
+      action: "hold_position",
+      actionText: "请先填写买入日期、买入价格和止损价格",
+      stage: "持仓信息不完整",
+      model: "持仓状态记录",
+      score: null,
+      matched: ["当前状态为已持仓"],
+      missing: ["需要买入日期", "需要买入价格", "需要止损价格"],
+      plan: ["补充持仓信息后，AI将按卖出观察方向评估。"],
+    };
+  }
+  if (advice && typeof advice === "object") advice.replayStructureKey = key;
+  rememberReplayAdviceCache(key, advice);
+  return advice;
+}
+
+function replayDisplayAdvice() {
+  const advice = replayStructuredAdvice();
+  if (!advice || typeof advice !== "object") return advice;
+  return applyHumanSupportBuyGate({ ...advice });
 }
 
 function activeReplayAdvice() {
-  const logged = loggedAdviceSnapshotForCurrentCandle();
-  if (logged) return logged;
-  return withLiveStructure(replayState.serverAdvice || frontendReplayAdvice() || replayServerAdvicePlaceholder());
+  return replayStructuredAdvice();
 }
 
 function applyHumanSupportBuyGate(advice, humanOverride) {
@@ -6891,29 +6999,14 @@ function renderRuleAdvice() {
   const copyButton = document.querySelector("#copyRuleAdviceSummary");
   const executeButton = document.querySelector("#executeRuleAdvice");
   if (!stageNode || !scoreNode || !bodyNode) return;
-  const loggedAdvice = loggedAdviceSnapshotForCurrentCandle();
-  let advice = loggedAdvice || replayState.serverAdvice || frontendReplayAdvice() || replayServerAdvicePlaceholder();
   if (titleNode) {
     const data = replayState.data || {};
     const symbol = displaySecuritySymbol(data, data.symbol || document.querySelector("#replaySymbol")?.value?.trim() || "--");
     const name = data.name || document.querySelector("#replayStockSearch")?.dataset.name || "";
     titleNode.textContent = name ? `AI\u7b56\u7565 (${symbol} ${name})` : `AI\u7b56\u7565 (${symbol})`;
   }
-  if (!loggedAdvice && !replayState.writeTraining && replayState.marketPosition?.status === "held" && !replayMarketPositionForAdvice()) {
-    advice.side = "sell";
-    advice.sideLabel = "\u5356\u51fa\u89c2\u5bdf";
-    advice.action = "hold_position";
-    advice.actionText = "\u8bf7\u5148\u586b\u5199\u4e70\u5165\u65e5\u671f\u3001\u4e70\u5165\u4ef7\u683c\u548c\u6b62\u635f\u4ef7\u683c";
-    advice.stage = "\u6301\u4ed3\u4fe1\u606f\u4e0d\u5b8c\u6574";
-    advice.model = "\u6301\u4ed3\u72b6\u6001\u8bb0\u5f55";
-    advice.score = null;
-    advice.matched = ["\u5f53\u524d\u72b6\u6001\u4e3a\u5df2\u6301\u4ed3"];
-    advice.missing = ["\u9700\u8981\u4e70\u5165\u65e5\u671f", "\u9700\u8981\u4e70\u5165\u4ef7\u683c", "\u9700\u8981\u6b62\u635f\u4ef7\u683c"];
-    advice.plan = ["\u8865\u5145\u6301\u4ed3\u4fe1\u606f\u540e\uff0cAI\u5c06\u6309\u5356\u51fa\u89c2\u5bdf\u65b9\u5411\u8bc4\u4f30\u3002"];
-  }
-  if (!loggedAdvice) advice = withLiveStructure(advice);
-  else if (currentReplayCandle()) advice = attachStructureRecognition({ ...advice }, replayDailyHistory());
-  advice = applyHumanSupportBuyGate(advice && typeof advice === "object" ? { ...advice } : advice);
+  const advice = replayDisplayAdvice();
+  const loggedAdvice = loggedAdviceSnapshotForCurrentCandle();
   const hasCandle = Boolean(currentReplayCandle());
   if (copyButton) copyButton.disabled = !hasCandle;
   if (executeButton) executeButton.disabled = !hasCandle;
@@ -7176,10 +7269,7 @@ function inferAiAdviceFeedback(action, reason, note, advice = currentAiAdviceSna
 
 
 function currentAiAdviceSnapshot() {
-  const logged = loggedAdviceSnapshotForCurrentCandle();
-  let advice = logged || activeReplayAdvice();
-  if (logged && currentReplayCandle()) advice = attachStructureRecognition({ ...advice }, replayDailyHistory());
-  advice = applyHumanSupportBuyGate(advice && typeof advice === "object" ? { ...advice } : advice);
+  const advice = replayDisplayAdvice() || {};
   return {
     trendDirection: advice.trendDirection || advice.trend?.direction || "",
     trendStage: advice.trendStage || advice.stage || "",
@@ -7273,7 +7363,10 @@ function loggedAdviceSnapshotForCurrentCandle() {
 function refreshReplayAdviceFromLevels({ resetFeedback = false } = {}) {
   syncManualLevelInputs();
   if (replayState.backtestMode) updateBacktestLevelUi();
-  if (!replayState.backtestMode) requestReplayServerAdvice();
+  if (!replayState.backtestMode) {
+    if (replayUsesServerAdvice()) requestReplayServerAdvice();
+    else renderRuleAdvice();
+  }
   drawReplayChart();
   if (resetFeedback && !replayState.backtestMode) resetAiAdviceFeedback();
 }
@@ -7529,14 +7622,13 @@ function updateReplayUi() {
   `).join("");
   renderRuleAdvice();
   drawReplayChart();
-  requestReplayServerAdvice();
+  if (replayUsesServerAdvice()) requestReplayServerAdvice();
 }
 
 function invalidateReplayServerAdvice() {
   replayState.serverAdvice = null;
   replayState.serverAdviceKey = "";
   replayState.serverAdviceStatus = "idle";
-  renderRuleAdvice();
 }
 
 function replayTrainingAnnotations(advice = currentAiAdviceSnapshot()) {

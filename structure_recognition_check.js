@@ -388,6 +388,32 @@ assert.strictEqual(sellKept.actionText, "建议卖出");
 assert.strictEqual(sellKept.score, 86);
 assert.ok(!appSource.slice(appSource.indexOf("function ruleLibraryAdvice("), appSource.indexOf("function manualSupportPrice(")).includes("applyHumanSupportBuyGate"));
 assert.ok(!generated.includes("applyHumanSupportBuyGate"));
+assert.ok(!generated.includes("replayStructuredAdvice"));
+assert.ok(appSource.includes("function replayUsesServerAdvice("));
+assert.ok(appSource.includes("function replayStructuredAdvice("));
+const historyContext = {
+  replayState: {
+    cursor: 899,
+    data: {
+      timeframes: {
+        daily: Array.from({ length: 900 }, (_, index) => ({ date: `d${index}`, close: index + 1 })),
+      },
+    },
+  },
+};
+require("vm").runInNewContext(
+  `${extractAppFunction(appSource, "replayDailyHistory")}\nthis.replayDailyHistory = replayDailyHistory;`,
+  historyContext,
+);
+const windowed = historyContext.replayDailyHistory();
+assert.strictEqual(windowed.length, 700);
+assert.strictEqual(windowed[0].date, "d200");
+assert.strictEqual(windowed.at(-1).date, "d899");
+const updateStart = appSource.indexOf("function updateReplayUi(");
+const updateEnd = appSource.indexOf("function invalidateReplayServerAdvice(");
+const updateSource = appSource.slice(updateStart, updateEnd);
+assert.ok(updateSource.includes("if (replayUsesServerAdvice()) requestReplayServerAdvice();"));
+assert.ok(!updateSource.includes("\n  requestReplayServerAdvice();\n"));
 
 console.log("structure recognition checks passed");
 console.log(JSON.stringify({
