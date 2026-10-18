@@ -183,29 +183,20 @@ assertDecisionUnchanged(withLevels, frozenDecisions.levels, levels, null);
 assertDecisionUnchanged(withLevels, frozenDecisions.position, levels, { entryPrice: withLevels.at(-20).close, entryDate: withLevels.at(-20).date, stopLoss: withLevels.at(-20).close * 0.95 });
 
 assert.strictEqual(upStructure.participatesInScoring, false);
-assert.strictEqual(upStructure.weeklyTrendDirection, "上涨", upStructure.weeklyTrendBasis);
-assert.ok(upStructure.weeklyTrendStage);
-assert.ok(upStructure.weeklyTrendStrength);
-assert.ok(upStructure.weeklyTrendBasis);
-assert.strictEqual(typeof upStructure.turnCount, "number");
-assert.ok(upStructure.zones);
-assert.strictEqual(downStructure.weeklyTrendDirection, "下跌", downStructure.weeklyTrendBasis);
-assert.notStrictEqual(upStructure.weeklyTrendDirection, downStructure.weeklyTrendDirection);
+assert.strictEqual(upStructure.weeklyTrendDirection, undefined);
+assert.strictEqual(upStructure.weeklyTrendStage, undefined);
+assert.strictEqual(upStructure.weeklyTrendBasis, undefined);
+assert.strictEqual(upStructure.weeklyTrendStrength, undefined);
+assert.strictEqual(upStructure.sellTrendBiasNote, undefined);
+assert.strictEqual(downStructure.weeklyTrendDirection, undefined);
 assert.strictEqual(upStructure.bypassSupportValidation.participatesInScoring, false);
-assert.ok(upStructure.sellTrendBiasNote);
-assert.ok(!upStructure.sellTrendBiasNote.includes("评分权重"));
 
 function redate(bars, offset) {
   return bars.map((bar, index) => ({ ...bar, date: dateAt(offset + index) }));
 }
 const reversalDown = wave(140, { start: 220, drift: -0.5, amplitude: 1.2 });
 const reversalUp = redate(wave(140, { start: reversalDown.at(-1).close, drift: 0.55, amplitude: 1.2 }), 140);
-const reversalEarly = core.recognizeMarketStructure(reversalDown);
 const reversalLater = core.recognizeMarketStructure(reversalDown.concat(reversalUp));
-assert.strictEqual(reversalEarly.weeklyTrendDirection, "下跌", reversalEarly.weeklyTrendBasis);
-assert.strictEqual(reversalLater.weeklyTrendDirection, "上涨", reversalLater.weeklyTrendBasis);
-assert.notStrictEqual(reversalEarly.weeklyTrendStage, reversalLater.weeklyTrendStage);
-assert.ok(reversalLater.weeklyTrendBasis.includes(reversalLater.asOfDate) || reversalLater.weeklyTrendBasis.includes("已收盘周线"));
 
 const rangedWeeks = [];
 for (let index = 0; index < 180; index += 1) {
@@ -214,9 +205,6 @@ for (let index = 0; index < 180; index += 1) {
   rangedWeeks.push(candle(index, prev, Math.max(prev, close) + 0.4, Math.min(prev, close) - 0.4, close));
 }
 const rangeStructure = core.recognizeMarketStructure(rangedWeeks);
-assert.strictEqual(rangeStructure.weeklyTrendDirection, "盘整", rangeStructure.weeklyTrendBasis);
-assert.ok(rangeStructure.turnCount >= 3, `turnCount ${rangeStructure.turnCount}`);
-assert.strictEqual(rangeStructure.weeklyTrendStage, "盘整结构，等待区间边界确认");
 
 function assertValidatedReasons(structure) {
   const seen = [...(structure.supportCandidates || [])];
@@ -242,8 +230,10 @@ assert.strictEqual(bypassAdvice.score, frozenDecisions.up.score);
 assert.strictEqual(bypassAdvice.action, frozenDecisions.up.action);
 assert.strictEqual(bypassAdvice.stage, frozenDecisions.up.stage);
 assert.strictEqual(bypassAdvice.bypassParticipatesInScoring, false);
-assert.ok(bypassAdvice.weeklyTrendDirection);
+assert.strictEqual(bypassAdvice.weeklyTrendDirection, undefined);
 assert.ok(bypassAdvice.bypassBuyReason);
+assert.ok(!bypassAdvice.bypassBuyReason.includes("周线"));
+assert.ok(bypassAdvice.bypassSupportValidation);
 
 const generated = require("fs").readFileSync("./strategy-core.js", "utf8");
 const adviceStart = generated.indexOf("function ruleLibraryAdvice(");
@@ -252,6 +242,11 @@ assert.ok(adviceStart > 0 && adviceEnd > adviceStart);
 const adviceSource = generated.slice(adviceStart, adviceEnd);
 assert.ok(!adviceSource.includes("recognizeMarketStructure"));
 assert.ok(!adviceSource.includes("trendConfidence"));
+assert.ok(!generated.includes("evaluateWeeklyTrendStructure"));
+assert.ok(!generated.includes("weeklyTrendDirection"));
+assert.ok(!generated.includes("sellTrendBiasNote"));
+assert.ok(generated.includes("evaluateSupportPathValidation"));
+assert.ok(generated.includes("buildBypassBuyGate"));
 
 console.log("structure recognition checks passed");
 console.log(JSON.stringify({
