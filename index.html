@@ -364,7 +364,50 @@
                   </div>
 
                   <div class="field-grid replay-structure-grid">
-                    <label>趋势结构判断 <input id="replayStructure" type="text" placeholder="如：上升趋势中的大调整" /></label>
+                    <label class="wide-field">趋势结构说明 <input id="replayStructure" type="text" placeholder="如：上升趋势中的大调整" /></label>
+                    <label>人工趋势方向
+                      <select id="replayTrendDirection">
+                        <option value="">未填写</option>
+                        <option value="上涨">上涨</option>
+                        <option value="下跌">下跌</option>
+                        <option value="盘整">盘整</option>
+                        <option value="趋势转换中">趋势转换中</option>
+                      </select>
+                    </label>
+                    <label>人工趋势阶段
+                      <select id="replayTrendStage">
+                        <option value="">未填写</option>
+                        <option value="超跌反弹">超跌反弹</option>
+                        <option value="趋势修复">趋势修复</option>
+                        <option value="震荡筑底">震荡筑底</option>
+                        <option value="突破确认">突破确认</option>
+                        <option value="回踩确认">回踩确认</option>
+                        <option value="盘整区间">盘整区间</option>
+                        <option value="上涨延续">上涨延续</option>
+                        <option value="下跌延续">下跌延续</option>
+                      </select>
+                    </label>
+                    <label>人工支撑状态
+                      <select id="replaySupportStatus">
+                        <option value="">未填写</option>
+                        <option value="候选">候选</option>
+                        <option value="验证中">验证中</option>
+                        <option value="已验证">已验证</option>
+                        <option value="已失效">已失效</option>
+                        <option value="跌破后收回">跌破后收回</option>
+                        <option value="已过期">已过期</option>
+                      </select>
+                    </label>
+                    <label>支撑验证依据
+                      <select id="replaySupportEvidence">
+                        <option value="">未填写</option>
+                        <option value="头肩底">头肩底</option>
+                        <option value="突破回踩">突破回踩</option>
+                        <option value="多次回踩反弹">多次回踩反弹</option>
+                        <option value="假跌破后收回">假跌破后收回</option>
+                        <option value="人工结构判断">人工结构判断</option>
+                      </select>
+                    </label>
                   </div>
                 </div>
 
@@ -512,6 +555,10 @@
                   <span>匹配度</span>
                   <strong id="backtestAdviceScore">--</strong>
                 </div>
+                <div class="backtest-structure-summary">
+                  <span>结构识别（不参与评分）</span>
+                  <strong id="backtestStructureSummary">--</strong>
+                </div>
               </section>
 
               <section class="backtest-level-panel" id="backtestLevelPanel">
@@ -570,6 +617,7 @@
       </section>
     </main>
 
-    <script src="app.js?v=20260618-watch-realtime-price"></script>
+    <script src="strategy-core.js"></script>
+    <script src="app.js?v=20261018-structure-recognition"></script>
   </body>
 </html>
